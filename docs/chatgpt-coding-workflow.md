@@ -62,18 +62,15 @@ to proceed with the user.
 
 ## Project Instructions
 
-When a workspace opens, DevSpace loads root-level instruction files:
+When a workspace opens, DevSpace resolves the active instruction chain from the
+Git/project root to the requested directory. Each directory selects at most one
+non-empty file: `AGENTS.override.md`, then `AGENTS.md`, then configured fallback
+filenames. Files are merged root-to-leaf and capped at 32 KiB by default.
 
-- `AGENTS.md`
-- `AGENTS.MD`
-- `CLAUDE.md`
-- `CLAUDE.MD`
-
-Nested instruction files are returned as `availableAgentsFiles`. The model
-should read the relevant nested file before working under that directory.
-
-This keeps instructions explicit and inspectable instead of silently injecting
-new context during later tool calls.
+Before the first read, command, or patch in a nested scope, DevSpace checks the
+chain again. New or modified instructions produce an `instructions_required`
+control result without running the requested action. The model reads it and
+retries the same call.
 
 ## Skills
 
@@ -134,7 +131,7 @@ such as `rg`, `find`, and `ls` for search and directory inspection.
 
 Use `DEVSPACE_TOOL_MODE=full` to restore dedicated search and directory tools.
 
-The experimental Codex-style surface is enabled with
+The Codex-native surface is enabled with
 `DEVSPACE_TOOL_MODE=codex`. It exposes:
 
 - `open_workspace`
@@ -144,24 +141,23 @@ The experimental Codex-style surface is enabled with
 - `write_stdin`
 
 In this mode, `write`, `edit`, `bash`, `grep`, `glob`, and `ls` are not
-registered. `exec_command` returns a process session ID when a command is still
-running after its yield window. Use `write_stdin` to poll it, send input, resize
-a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
+registered. `export_file` is also hidden so the coding surface stays at five
+tools. `apply_patch` performs one structured create, update, or delete operation
+using a bare V4A diff; wrapper-style patch documents are rejected.
 
-## Show Changes
+`exec_command` separates stdout and stderr and returns an explicit exit,
+running, or timeout outcome. A running outcome includes the session ID for
+`write_stdin`, which can poll, send input, resize a PTY, or send Ctrl-C. Set
+`tty: true` only for commands that need a terminal.
+
+## Change inspection
 
 By default, `DEVSPACE_WIDGETS=full`.
 
-In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
-and shell tools. The aggregate `show_changes` tool is not exposed by default.
-
-Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
-to expose the aggregate show-changes flow.
-
-When `show_changes` is exposed, models should call it exactly once after the
-final file modification in any turn that changes files. The tool only requires
-the `workspaceId`; DevSpace automatically compares against the last shown
-checkpoint and advances that checkpoint after rendering the aggregate diff.
+In that mode, DevSpace attaches widget UI to exposed workspace, file, edit, and
+shell tools. `show_changes` is not model-callable in any mode. Inspect changes
+when useful with normal Git commands through `exec_command` or `bash`, such as
+`git status --short`, `git diff --stat`, and a bounded `git diff`.
 
 ## Shell Use
 
@@ -173,5 +169,7 @@ The shell tool is for commands that belong in a terminal:
 - package scripts
 - environment checks
 
-File writes should go through the edit/write tools rather than shell
-redirection, heredocs, `tee`, `sed -i`, or generated scripts.
+Use edit/write or structured `apply_patch` for intentional direct text edits.
+Commands may modify files when required by formatters, package managers, build
+systems, migrations, generators, Git operations, or project scripts. Inspect
+the resulting changes and avoid unrelated modifications.

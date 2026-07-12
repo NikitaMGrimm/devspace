@@ -229,6 +229,6 @@ Per-tool widget cards are enabled by default with:
 DEVSPACE_WIDGETS=full
 ```
 
-The aggregate `show_changes` tool is only exposed with
-`DEVSPACE_WIDGETS=changes`. Plain MCP clients may ignore ChatGPT Apps widget
-metadata and only show text results.
+`show_changes` is no longer model-callable. Use `git status` and `git diff`
+through the shell tools when change inspection is useful. Plain MCP clients may
+ignore ChatGPT Apps widget metadata and only show text results.

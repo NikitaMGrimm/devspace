@@ -4,6 +4,11 @@ import { expandHomePath } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
+import {
+  DEFAULT_PROJECT_INSTRUCTION_MAX_BYTES,
+  validateInstructionFallbackFileNames,
+  type ProjectInstructionConfig,
+} from "./project-instructions.js";
 
 export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
@@ -41,6 +46,7 @@ export interface ServerConfig {
   subagents: boolean;
   agentDir: string;
   exports: ExportConfig;
+  projectInstructions: ProjectInstructionConfig;
   logging: LoggingConfig;
 }
 
@@ -126,6 +132,15 @@ function parsePathList(value: string | undefined): string[] {
       ?.split(",")
       .map((entry) => entry.trim())
       .filter(Boolean) ?? []
+  );
+}
+
+function parseInstructionFallbackFileNames(value: string | undefined): string[] {
+  return validateInstructionFallbackFileNames(
+    value
+      ?.split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean) ?? [],
   );
 }
 
@@ -280,6 +295,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         : parseBoolean(env.DEVSPACE_SUBAGENTS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
     exports: parseExportConfig(env),
+    projectInstructions: {
+      fallbackFileNames: parseInstructionFallbackFileNames(
+        env.DEVSPACE_INSTRUCTION_FALLBACK_FILENAMES,
+      ),
+      maxBytes: parsePositiveInteger(
+        env.DEVSPACE_INSTRUCTION_MAX_BYTES,
+        DEFAULT_PROJECT_INSTRUCTION_MAX_BYTES,
+        "DEVSPACE_INSTRUCTION_MAX_BYTES",
+      ),
+    },
     logging: parseLoggingConfig(env),
   };
 }

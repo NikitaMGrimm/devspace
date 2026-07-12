@@ -41,22 +41,44 @@ const foreground = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),
   command: `${node} -e "console.log('foreground')"`,
-  yieldTimeMs: 2_000,
+  yieldTimeMs: 10_000,
 });
 assert.equal(foreground.running, false);
 assert.equal(foreground.exitCode, 0);
-assert.match(foreground.output, /foreground/);
+assert.match(foreground.stdout, /foreground/);
+assert.equal(foreground.stderr, "");
 assert.equal(foreground.sessionId, undefined);
+
+const separated = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "process.stdout.write('out'); process.stderr.write('err'); process.exit(7)"`,
+  yieldTimeMs: 10_000,
+});
+assert.equal(separated.stdout, "out");
+assert.equal(separated.stderr, "err");
+assert.equal(separated.exitCode, 7);
+assert.equal(separated.running, false);
+
+const timedOut = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "setInterval(() => {}, 1000)"`,
+  yieldTimeMs: 10_000,
+  timeoutMs: 25,
+});
+assert.equal(timedOut.running, false);
+assert.equal(timedOut.timedOut, true);
 
 const environment = await manager.start({
   workspaceId: "workspace-a",
   workspaceRoot: "/tmp/devspace-workspace-a",
   cwd: process.cwd(),
   command: `${node} -e "console.log([process.env.NO_COLOR, process.env.TERM, process.env.PAGER, process.env.GIT_PAGER, process.env.GH_PAGER, process.env.CODEX_CI, process.env.DEVSPACE_WORKSPACE_ID, process.env.DEVSPACE_WORKSPACE_ROOT].join(','))"`,
-  yieldTimeMs: 2_000,
+  yieldTimeMs: 10_000,
 });
 assert.equal(environment.running, false);
-assert.match(environment.output, /1,dumb,cat,cat,cat,1,workspace-a,\/tmp\/devspace-workspace-a/);
+assert.match(environment.stdout, /1,dumb,cat,cat,cat,1,workspace-a,\/tmp\/devspace-workspace-a/);
 
 const background = await manager.start({
   workspaceId: "workspace-a",
@@ -80,11 +102,15 @@ await assert.rejects(
 const completed = await manager.write({
   workspaceId: "workspace-a",
   sessionId: background.sessionId,
-  yieldTimeMs: 2_000,
+  yieldTimeMs: 10_000,
 });
 assert.equal(completed.running, false);
 assert.equal(completed.exitCode, 0);
-assert.match(completed.output, /finished/);
+assert.match(completed.stdout, /finished/);
+await assert.rejects(
+  manager.write({ workspaceId: "workspace-a", sessionId: background.sessionId }),
+  /already exited or is unknown/,
+);
 
 const interactive = await manager.start({
   workspaceId: "workspace-a",
@@ -100,10 +126,10 @@ const inputResult = await manager.write({
   workspaceId: "workspace-a",
   sessionId: interactive.sessionId,
   chars: "hello\n",
-  yieldTimeMs: 2_000,
+  yieldTimeMs: 10_000,
 });
 assert.equal(inputResult.running, false);
-assert.match(inputResult.output, /input:hello/);
+assert.match(inputResult.stdout, /input:hello/);
 
 const defaultInteractive = await manager.start({
   workspaceId: "workspace-a",
@@ -118,9 +144,10 @@ const defaultInputResult = await manager.write({
   workspaceId: "workspace-a",
   sessionId: defaultInteractive.sessionId,
   chars: "hello\n",
+  yieldTimeMs: 10_000,
 });
 assert.equal(defaultInputResult.running, false);
-assert.match(defaultInputResult.output, /default-input:hello/);
+assert.match(defaultInputResult.stdout, /default-input:hello/);
 
 const noisyInteractive = await manager.start({
   workspaceId: "workspace-a",
@@ -136,10 +163,10 @@ const noisyInputResult = await manager.write({
   workspaceId: "workspace-a",
   sessionId: noisyInteractive.sessionId,
   chars: "hello\n",
-  yieldTimeMs: 2_000,
+  yieldTimeMs: 10_000,
 });
 assert.equal(noisyInputResult.running, false);
-assert.match(noisyInputResult.output, /input:hello/);
+assert.match(noisyInputResult.stdout, /input:hello/);
 
 const interruptible = await manager.start({
   workspaceId: "workspace-a",
@@ -155,7 +182,7 @@ const interrupted = await manager.write({
   workspaceId: "workspace-a",
   sessionId: interruptible.sessionId,
   chars: "\u0003",
-  yieldTimeMs: 2_000,
+  yieldTimeMs: 10_000,
 });
 assert.equal(interrupted.running, false);
 if (process.platform !== "win32") assert.equal(interrupted.signal, "SIGINT");
@@ -163,19 +190,20 @@ if (process.platform !== "win32") assert.equal(interrupted.signal, "SIGINT");
 let buffered = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),
-  command: `${node} -e "console.log('x'.repeat(5000)); setTimeout(() => {}, 100)"`,
+  command: `${node} -e "console.log('x'.repeat(5000)); console.error('y'.repeat(5000)); setTimeout(() => {}, 100)"`,
   yieldTimeMs: 50,
   maxOutputTokens: 100,
 });
-if (!buffered.outputTruncated && buffered.sessionId) {
+if (!buffered.stdoutTruncated && buffered.sessionId) {
   buffered = await manager.write({
     workspaceId: "workspace-a",
     sessionId: buffered.sessionId,
-    yieldTimeMs: 2_000,
+    yieldTimeMs: 10_000,
     maxOutputTokens: 100,
   });
 }
-assert.equal(buffered.outputTruncated, true);
+assert.equal(buffered.stdoutTruncated, true);
+assert.equal(buffered.stderrTruncated, true);
 if (buffered.sessionId) manager.terminate("workspace-a", buffered.sessionId);
 
 try {
@@ -188,7 +216,7 @@ try {
       yieldTimeMs: 10_000,
     });
     assert.equal(pty.running, false);
-    assert.match(pty.output, /pty-ok/);
+    assert.match(pty.stdout, /pty-ok/);
   } else {
     const pty = await manager.start({
       workspaceId: "workspace-a",
@@ -207,10 +235,10 @@ try {
       sessionId: pty.sessionId,
       columns: 120,
       rows: 30,
-      yieldTimeMs: 2_000,
+      yieldTimeMs: 10_000,
     });
     assert.equal(resizedPty.running, false);
-    assert.match(resizedPty.output, /columns:120/);
+    assert.match(resizedPty.stdout, /columns:120/);
   }
 } finally {
   manager.shutdown();

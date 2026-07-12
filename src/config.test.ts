@@ -33,6 +33,26 @@ assert.deepEqual(loadConfig(baseEnv).exports, {
   maxEntries: 64,
   maxTotalBytes: 536870912,
 });
+assert.deepEqual(loadConfig(baseEnv).projectInstructions, {
+  fallbackFileNames: [],
+  maxBytes: 32768,
+});
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_INSTRUCTION_FALLBACK_FILENAMES: "CLAUDE.md,PROJECT.md,CLAUDE.md",
+    DEVSPACE_INSTRUCTION_MAX_BYTES: "4096",
+  }).projectInstructions,
+  { fallbackFileNames: ["CLAUDE.md", "PROJECT.md"], maxBytes: 4096 },
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_INSTRUCTION_FALLBACK_FILENAMES: "../AGENTS.md" }),
+  /Invalid project instruction fallback filename/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_INSTRUCTION_MAX_BYTES: "0" }),
+  /Invalid DEVSPACE_INSTRUCTION_MAX_BYTES/,
+);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "1" }).skillsEnabled, true);
 assert.equal(
