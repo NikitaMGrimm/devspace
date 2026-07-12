@@ -89,7 +89,7 @@ operating system temporary directory and are removed at expiry or shutdown.
 | --- | --- |
 | `minimal` | Default. Exposes `open_workspace`, `read`, `write`, `edit`, and `bash`. Clients use `bash` with tools such as `rg`, `find`, and `ls` for inspection. |
 | `full` | Exposes the minimal tools plus dedicated `grep`, `glob`, and `ls` tools. |
-| `codex` | Experimental. Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell tools are hidden. |
+| `codex` | Exposes only `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation, export, and shell tools are hidden. |
 
 `DEVSPACE_MINIMAL_TOOLS` remains a backward-compatible alias when
 `DEVSPACE_TOOL_MODE` is unset: `1` selects `minimal` and `0` selects `full`.
@@ -99,7 +99,29 @@ its fixed short tool names regardless of `DEVSPACE_TOOL_NAMING`.
 Codex-mode commands run without a PTY by default. Set `tty: true` on
 `exec_command` for interactive terminal programs. PTY support uses the optional
 `node-pty` dependency; `write_stdin` can send input, poll output, and resize PTY
-sessions.
+sessions. Standard commands return separate `stdout` and `stderr` fields with an
+explicit `exit`, `running`, or `timeout` outcome. The default execution timeout
+is 60 seconds; set `timeoutMs: 0` to disable it for a deliberate long-running
+process.
+
+Codex-mode `apply_patch` accepts one `create_file`, `update_file`, or
+`delete_file` operation per call. Create and update operations use a bare V4A
+diff. The previous `*** Begin Patch` wrapper format is intentionally not
+accepted and no legacy patch tool is exposed.
+
+## Project instructions
+
+DevSpace selects project instructions from the Git/project root through the
+requested scope. Each directory contributes at most one non-empty file, in this
+order: `AGENTS.override.md`, `AGENTS.md`, then configured fallback names. The
+merged root-to-leaf content defaults to a 32 KiB limit. A first operation in a
+new or changed nested scope returns `instructions_required`; retry the original
+call after reading that result.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_INSTRUCTION_FALLBACK_FILENAMES` | empty | Comma-separated fallback filenames, in precedence order. |
+| `DEVSPACE_INSTRUCTION_MAX_BYTES` | `32768` | Maximum merged instruction bytes returned to the model. |
 
 ## Widgets
 
@@ -108,7 +130,7 @@ sessions.
 | Value | Behavior |
 | --- | --- |
 | `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
+| `changes` | Attaches widget UI to `open_workspace`. Kept as a display compatibility setting; it does not expose `show_changes`. |
 | `off` | Disables widget UI. |
 
 ## Skills

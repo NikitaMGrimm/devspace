@@ -57,12 +57,9 @@ try {
   assert.equal(workspace.mode, "checkout");
   assert.deepEqual(
     agentsFiles.map((file) => file.content),
-    ["global instructions\n", "root instructions\n"],
+    ["root instructions\n"],
   );
-  assert.deepEqual(
-    availableAgentsFiles.map((file) => file.path),
-    [join(root, "nested", "AGENTS.md")],
-  );
+  assert.deepEqual(availableAgentsFiles, []);
   assert.deepEqual(
     workspace.agentProfiles.map((profile) => ({
       name: profile.name,
@@ -131,12 +128,21 @@ try {
   await mkdir(gitRoot);
   await writeFile(join(gitRoot, "AGENTS.md"), "git root instructions\n");
   await writeFile(join(gitRoot, "README.md"), "hello\n");
+  await mkdir(join(gitRoot, "nested"));
+  await writeFile(join(gitRoot, "nested", "AGENTS.md"), "git nested instructions\n");
   await git(gitRoot, ["init"]);
   await git(gitRoot, ["config", "user.email", "devspace@example.com"]);
   await git(gitRoot, ["config", "user.name", "DevSpace Test"]);
   await git(gitRoot, ["add", "."]);
   await git(gitRoot, ["commit", "-m", "Initial commit"]);
   await writeFile(join(gitRoot, "dirty.txt"), "not copied\n");
+
+  const nestedGitWorkspace = await registry.openWorkspace(join(gitRoot, "nested"));
+  assert.equal(nestedGitWorkspace.workspace.root, gitRoot);
+  assert.deepEqual(
+    nestedGitWorkspace.instructionChain.sources.map((source) => source.content),
+    ["git root instructions\n", "git nested instructions\n"],
+  );
 
   const worktreeWorkspace = await registry.openWorkspace({
     path: gitRoot,
@@ -150,7 +156,6 @@ try {
   assert.equal(worktreeWorkspace.workspace.worktree?.dirtySource, true);
   assert.equal(worktreeWorkspace.workspace.worktree?.managed, true);
   assert.equal((await stat(worktreeWorkspace.workspace.root)).isDirectory(), true);
-  assert.match(worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"), /global instructions/);
   assert.match(worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"), /git root instructions/);
 
   const worktreeReadmePath = registry.resolvePath(worktreeWorkspace.workspace, "README.md");
@@ -198,7 +203,7 @@ try {
     const aliasCheckout = await new WorkspaceRegistry(aliasConfig).openWorkspace(aliasRoot);
     assert.deepEqual(
       aliasCheckout.agentsFiles.map((file) => file.content),
-      ["global instructions\n", "root instructions\n"],
+      ["root instructions\n"],
     );
   }
 } finally {
