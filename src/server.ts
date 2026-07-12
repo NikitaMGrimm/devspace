@@ -187,7 +187,7 @@ interface ToolLogFields {
 
 function serverInstructions(config: ServerConfig): string {
   if (config.toolMode === "codex") {
-    return "Use open_workspace once per project checkout or worktree and reuse its workspaceId.\n\nUse read for targeted inspection of a known text file. Use exec_command for searches, filtering, logs, generated output, tests, builds, package operations, Git inspection, and multi-file work. Keep output bounded instead of dumping entire large files or logs.\n\nUse apply_patch for intentional direct edits to text files. It accepts one structured create_file, update_file, or delete_file operation per call. Create and update diffs are bare V4A diffs; do not include *** Begin Patch or file-header wrappers.\n\nCommands may modify files when required by formatters, package managers, build systems, migrations, generators, Git operations, or project scripts. Inspect resulting changes and avoid unrelated modifications.\n\nRespect the active project instructions returned by open_workspace. Use workingDirectory rather than embedding cd when nested directory instructions may apply. If a tool returns instructions_required, read those instructions and retry the original call.\n\nUse write_stdin to poll or interact with a running command session.\n\nUse exec_command with Git status or diff commands when change inspection is useful. Do not require a dedicated final diff tool call.";
+    return "Call open_workspace once per project or worktree and reuse its workspace_id. Respect the project instructions it returns and any later instructions_required response. Use read for a known text file, exec_command for searches and commands, apply_patch for structured text edits, write_stdin for running sessions, and export_file for downloadable artifacts. Keep command output bounded.";
   }
 
   const inspection = config.toolMode !== "full"
@@ -256,6 +256,22 @@ const workspaceLocalAgentOutputSchema = z.object({
 });
 
 const workspaceLocalAgentProviderOutputSchema = z.object({
+  name: z.string(),
+  available: z.boolean(),
+  reason: z.string().optional(),
+});
+
+const codexWorkspaceLocalAgentOutputSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  provider: z.string(),
+  model: z.string().optional(),
+  thinking: z.string().optional(),
+  provider_available: z.boolean().optional(),
+  provider_unavailable_reason: z.string().optional(),
+});
+
+const codexWorkspaceLocalAgentProviderOutputSchema = z.object({
   name: z.string(),
   available: z.boolean(),
   reason: z.string().optional(),
@@ -352,10 +368,17 @@ function instructionPreflightResponse(preflight: {
   instructions: string;
   truncated: boolean;
   retryRequired: true;
-}) {
+}, codex = false) {
+  const structuredContent = codex ? {
+    status: preflight.status,
+    instruction_sources: preflight.instructionSources,
+    instructions: preflight.instructions,
+    truncated: preflight.truncated,
+    retry_required: preflight.retryRequired,
+  } : { ...preflight };
   return {
     content: [textBlock("Project instructions changed for this scope; read them and retry the original call.")],
-    structuredContent: { ...preflight },
+    structuredContent,
   };
 }
 
@@ -391,12 +414,14 @@ async function readBoundedTextFile(
   truncated: boolean;
 }> {
   const bytes = await readFile(absolutePath);
-  if (bytes.includes(0)) throw new Error("Binary files containing NUL bytes cannot be read as text.");
+  if (bytes.includes(0)) {
+    throw new Error("Binary files cannot be read as text; use export_file to return a downloadable artifact.");
+  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new Error("File is not valid UTF-8 text.");
+    throw new Error("File is not valid UTF-8 text; use export_file to return a downloadable artifact.");
   }
   const normalized = text.replace(/\r\n/g, "\n");
   const lines = normalized === "" ? [] : normalized.endsWith("\n")
@@ -567,21 +592,22 @@ async function assertWorkspaceAppAssets(): Promise<void> {
 function processOutputSchema(): z.ZodRawShape {
   return {
     status: z.enum(["instructions_required", "failed"]).optional(),
-    instructionSources: z.array(z.string()).optional(),
+    instruction_sources: z.array(z.string()).optional(),
     instructions: z.string().optional(),
     truncated: z.boolean().optional(),
-    retryRequired: z.boolean().optional(),
+    retry_required: z.boolean().optional(),
     error: z.string().optional(),
     stdout: z.string().optional(),
     stderr: z.string().optional(),
     outcome: z.discriminatedUnion("type", [
-      z.object({ type: z.literal("exit"), exitCode: z.number().int(), signal: z.string().optional() }).strict(),
-      z.object({ type: z.literal("running"), sessionId: z.number().int() }).strict(),
+      z.object({ type: z.literal("exit"), exit_code: z.number().int(), signal: z.string().optional() }).strict(),
+      z.object({ type: z.literal("running"), session_id: z.number().int() }).strict(),
       z.object({ type: z.literal("timeout") }).strict(),
     ]).optional(),
-    wallTimeMs: z.number().nonnegative().optional(),
-    stdoutTruncated: z.boolean().optional(),
-    stderrTruncated: z.boolean().optional(),
+    wall_time_seconds: z.number().nonnegative().optional().describe("Elapsed wall time spent waiting for output during this tool call."),
+    stdout_truncated: z.literal(true).optional(),
+    stderr_truncated: z.literal(true).optional(),
+    original_output_tokens: z.number().int().nonnegative().optional(),
   };
 }
 
@@ -594,13 +620,13 @@ function processToolResponse(
   const outcome = snapshot.timedOut
     ? { type: "timeout" as const }
     : snapshot.running
-      ? { type: "running" as const, sessionId: snapshot.sessionId! }
-      : { type: "exit" as const, exitCode: snapshot.exitCode ?? 1, signal: snapshot.signal };
+      ? { type: "running" as const, session_id: snapshot.sessionId! }
+      : { type: "exit" as const, exit_code: snapshot.exitCode ?? 1, signal: snapshot.signal };
   const result = outcome.type === "running"
-    ? `Process is still running (session ${outcome.sessionId}).`
+    ? `Process is still running (session ${outcome.session_id}).`
     : outcome.type === "timeout"
       ? "Process reached its execution timeout."
-      : `Process exited with code ${outcome.exitCode}.`;
+      : `Process exited with code ${outcome.exit_code}.`;
   return {
     content: [textBlock(result)],
     _meta: {
@@ -614,9 +640,12 @@ function processToolResponse(
       stdout: snapshot.stdout,
       stderr: snapshot.stderr,
       outcome,
-      wallTimeMs: snapshot.wallTimeMs,
-      stdoutTruncated: snapshot.stdoutTruncated,
-      stderrTruncated: snapshot.stderrTruncated,
+      wall_time_seconds: snapshot.wallTimeMs / 1_000,
+      ...(snapshot.stdoutTruncated ? { stdout_truncated: true as const } : {}),
+      ...(snapshot.stderrTruncated ? { stderr_truncated: true as const } : {}),
+      ...(snapshot.originalOutputTokens !== undefined
+        ? { original_output_tokens: snapshot.originalOutputTokens }
+        : {}),
     },
   };
 }
@@ -633,35 +662,33 @@ function registerCodexProcessTools(
     {
       title: "Execute command",
       description:
-        "Run a shell command inside an open workspace. Use workingDirectory instead of embedding cd when directory-specific project instructions may apply. Returns separate stdout, stderr, and an explicit exit, running, or timeout outcome. Long-running commands return a session for write_stdin.",
+        "Run a shell command inside an open workspace, returning output or a session_id for ongoing interaction.",
       inputSchema: z.object({
-        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        workspace_id: z.string().describe("Workspace returned by open_workspace."),
         cmd: z.string().min(1).describe("Shell command to execute."),
         tty: z
           .boolean()
           .optional()
           .describe("Allocate a pseudo-terminal for interactive commands. Defaults to false."),
-        columns: z.number().int().min(1).max(1_000).optional().describe("Initial PTY width. Defaults to 80."),
-        rows: z.number().int().min(1).max(1_000).optional().describe("Initial PTY height. Defaults to 24."),
-        workingDirectory: z
+        workdir: z
           .string()
           .optional()
           .describe("Working directory relative to the workspace root. Defaults to the workspace root."),
-        yieldTimeMs: z
+        yield_time_ms: z
           .number()
           .int()
           .min(0)
           .max(30_000)
           .optional()
-          .describe("Milliseconds to wait before returning a running session. Defaults to 10000."),
-        timeoutMs: z
+          .describe("Time to wait for output before returning a running session. Defaults to 10000. Zero yields immediately."),
+        timeout_ms: z
           .number()
           .int()
           .min(0)
           .max(86_400_000)
           .optional()
           .describe("Execution timeout in milliseconds. Defaults to 60000; use 0 to disable."),
-        maxOutputTokens: z
+        max_output_tokens: z
           .number()
           .int()
           .positive()
@@ -673,29 +700,28 @@ function registerCodexProcessTools(
       ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory, yieldTimeMs, timeoutMs, maxOutputTokens }) => {
+    async ({ workspace_id, cmd, tty, workdir, yield_time_ms, timeout_ms, max_output_tokens }) => {
       const startedAt = performance.now();
+      const workspaceId = workspace_id;
       const workspace = workspaces.getWorkspace(workspaceId);
-      const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
+      const cwd = workspaces.resolveWorkingDirectory(workspace, workdir);
       const preflight = await workspaces.preflightInstructions(workspace, cwd);
-      if (preflight) return instructionPreflightResponse(preflight);
+      if (preflight) return instructionPreflightResponse(preflight, true);
       const snapshot = await processSessions.start({
         workspaceId,
         command: cmd,
         cwd,
         workspaceRoot: workspace.root,
         tty,
-        columns,
-        rows,
-        yieldTimeMs,
-        timeoutMs,
-        maxOutputTokens,
+        yieldTimeMs: yield_time_ms,
+        timeoutMs: timeout_ms,
+        maxOutputTokens: max_output_tokens,
       });
 
       logToolCall(config, {
         tool: "exec_command",
         workspaceId,
-        workingDirectory: workingDirectory ?? ".",
+        workingDirectory: workdir ?? ".",
         command: cmd,
         commandLength: cmd.length,
         success: true,
@@ -710,7 +736,7 @@ function registerCodexProcessTools(
 
       return processToolResponse("exec_command", workspaceId, snapshot, {
         command: cmd,
-        workingDirectory: workingDirectory ?? ".",
+        workingDirectory: workdir ?? ".",
         running: snapshot.running,
         exitCode: snapshot.exitCode,
         wallTimeMs: snapshot.wallTimeMs,
@@ -724,21 +750,19 @@ function registerCodexProcessTools(
     {
       title: "Write to process",
       description:
-        "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C.",
+        "Write characters to an existing exec_command session and return recent output.",
       inputSchema: z.object({
-        workspaceId: z.string().describe("Workspace identifier used to start the process."),
-        sessionId: z.number().describe("Process session identifier returned by exec_command."),
-        chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
-        columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
-        rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
-        yieldTimeMs: z
+        workspace_id: z.string().describe("Workspace that owns the session."),
+        session_id: z.number().describe("Session identifier returned by exec_command."),
+        chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll. Pass \\u0003 for Ctrl-C."),
+        yield_time_ms: z
           .number()
           .int()
           .min(0)
           .max(30_000)
           .optional()
           .describe("Milliseconds to wait for process output or completion. Defaults to 10000."),
-        maxOutputTokens: z
+        max_output_tokens: z
           .number()
           .int()
           .positive()
@@ -750,8 +774,10 @@ function registerCodexProcessTools(
       ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, sessionId, chars, columns, rows, yieldTimeMs, maxOutputTokens }) => {
+    async ({ workspace_id, session_id, chars, yield_time_ms, max_output_tokens }) => {
       const startedAt = performance.now();
+      const workspaceId = workspace_id;
+      const sessionId = session_id;
       workspaces.getWorkspace(workspaceId);
       let snapshot: ProcessSnapshot;
       try {
@@ -759,10 +785,8 @@ function registerCodexProcessTools(
           workspaceId,
           sessionId,
           chars,
-          columns,
-          rows,
-          yieldTimeMs,
-          maxOutputTokens,
+          yieldTimeMs: yield_time_ms,
+          maxOutputTokens: max_output_tokens,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unable to interact with process session.";
@@ -855,6 +879,98 @@ function createMcpServer(
     },
   );
 
+  const handleExportFile = async (
+    workspaceId: string,
+    path: string,
+    downloadName?: string,
+    codexResult = false,
+  ) => {
+    const startedAt = performance.now();
+    try {
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const target = workspaces.resolvePath(workspace, path);
+      const preflight = await workspaces.preflightInstructions(workspace, dirname(target));
+      if (preflight) return instructionPreflightResponse(preflight, codexResult);
+      const result = await exportManager.exportFile({
+        workspaceRoot: workspace.root,
+        path,
+        downloadName,
+      });
+      logToolCall(config, {
+        tool: "export_file",
+        workspaceId,
+        size: result.size,
+        mimeType: result.mimeType,
+        sha256Prefix: result.sha256.slice(0, 12),
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      if (!codexResult) return exportToolResult(result);
+      return {
+        content: [{
+          type: "resource_link" as const,
+          uri: result.url,
+          name: result.name,
+          mimeType: result.mimeType,
+          size: result.size,
+        }],
+        structuredContent: {
+          url: result.url,
+          filename: result.name,
+          mime_type: result.mimeType,
+          size: result.size,
+          sha256: result.sha256,
+          expires_at: result.expiresAt,
+        },
+      };
+    } catch (error) {
+      const message =
+        error instanceof ExportFileError
+          ? error.message
+          : error instanceof Error && error.message.startsWith("Unknown workspaceId:")
+            ? "Unknown workspace. Call open_workspace first."
+            : "Unable to export file.";
+      logToolCall(config, {
+        tool: "export_file",
+        workspaceId,
+        success: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        error: message,
+      });
+      return { content: [textBlock(message)], isError: true };
+    }
+  };
+
+  if (config.toolMode === "codex") registerAppTool(
+    server,
+    "export_file",
+    {
+      title: "Export file",
+      description:
+        "Export a regular workspace file as a downloadable resource. Use this for binary or downloadable artifacts instead of printing binary or base64 data.",
+      inputSchema: z.object({
+        workspace_id: z.string().describe("Workspace containing the file."),
+        path: z.string().describe("Workspace-relative path to a regular file."),
+      }).strict(),
+      outputSchema: {
+        status: z.literal("instructions_required").optional(),
+        instruction_sources: z.array(z.string()).optional(),
+        instructions: z.string().optional(),
+        truncated: z.boolean().optional(),
+        retry_required: z.boolean().optional(),
+        url: z.string().url().optional(),
+        filename: z.string().optional(),
+        mime_type: z.string().optional(),
+        size: z.number().int().nonnegative().optional(),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+        expires_at: z.string().optional(),
+      },
+      ...toolWidgetDescriptorMeta(config, "read"),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workspace_id, path }) => handleExportFile(workspace_id, path, undefined, true),
+  );
+
   if (config.toolMode !== "codex") registerAppTool(
     server,
     "export_file",
@@ -868,52 +984,22 @@ function createMcpServer(
         downloadName: z.string().optional().describe("Optional safe attachment filename."),
       },
       outputSchema: {
-        url: z.string().url(),
-        name: z.string(),
-        mimeType: z.string(),
-        size: z.number().int().nonnegative(),
-        sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-        expiresAt: z.string(),
+        status: z.literal("instructions_required").optional(),
+        instructionSources: z.array(z.string()).optional(),
+        instructions: z.string().optional(),
+        truncated: z.boolean().optional(),
+        retryRequired: z.boolean().optional(),
+        url: z.string().url().optional(),
+        name: z.string().optional(),
+        mimeType: z.string().optional(),
+        size: z.number().int().nonnegative().optional(),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+        expiresAt: z.string().optional(),
       },
       ...toolWidgetDescriptorMeta(config, "read"),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ workspaceId, path, downloadName }) => {
-      const startedAt = performance.now();
-      try {
-        const workspace = workspaces.getWorkspace(workspaceId);
-        const result = await exportManager.exportFile({
-          workspaceRoot: workspace.root,
-          path,
-          downloadName,
-        });
-        logToolCall(config, {
-          tool: "export_file",
-          workspaceId,
-          size: result.size,
-          mimeType: result.mimeType,
-          sha256Prefix: result.sha256.slice(0, 12),
-          success: true,
-          durationMs: Math.round(performance.now() - startedAt),
-        });
-        return exportToolResult(result);
-      } catch (error) {
-        const message =
-          error instanceof ExportFileError
-            ? error.message
-            : error instanceof Error && error.message.startsWith("Unknown workspaceId:")
-              ? "Unknown workspace. Call open_workspace first."
-              : "Unable to export file.";
-        logToolCall(config, {
-          tool: "export_file",
-          workspaceId,
-          success: false,
-          durationMs: Math.round(performance.now() - startedAt),
-          error: message,
-        });
-        return { content: [textBlock(message)], isError: true };
-      }
-    },
+    async ({ workspaceId, path, downloadName }) => handleExportFile(workspaceId, path, downloadName),
   );
 
   registerAppTool(
@@ -922,8 +1008,14 @@ function createMcpServer(
     {
       title: "Open workspace",
       description:
-        "Open a project checkout or managed worktree as a contained coding workspace. Call once per project or worktree and reuse the returned workspaceId. The result includes repository state and the active project-instruction chain.",
-      inputSchema: z.object({
+        config.toolMode === "codex"
+          ? "Open a project checkout or managed worktree and return a reusable workspace_id, repository state, and active project instructions. Call once per project or worktree and reuse its workspace_id."
+          : "Open a project checkout or managed worktree as a contained coding workspace. Call once per project or worktree and reuse the returned workspaceId. The result includes repository state and the active project-instruction chain.",
+      inputSchema: config.toolMode === "codex" ? z.object({
+        path: z.string().describe("Absolute or supported home-relative path inside an allowed root."),
+        mode: z.enum(["checkout", "worktree"]).optional().describe("Open the existing checkout or create an isolated managed worktree."),
+        base_ref: z.string().optional().describe("Git ref used only when creating a worktree. Defaults to HEAD."),
+      }).strict() : z.object({
         path: z
           .string()
           .describe(
@@ -940,7 +1032,34 @@ function createMcpServer(
           .optional()
           .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
       }).strict(),
-      outputSchema: {
+      outputSchema: config.toolMode === "codex" ? {
+        workspace_id: z.string(),
+        root: z.string(),
+        mode: z.enum(["checkout", "worktree"]),
+        source_root: z.string().optional(),
+        worktree: z.object({
+          path: z.string(),
+          base_ref: z.string(),
+          base_sha: z.string(),
+          dirty_source: z.boolean(),
+          detached: z.boolean(),
+          managed: z.boolean(),
+        }).optional(),
+        git: z.object({
+          is_repository: z.boolean(),
+          branch: z.string().optional(),
+          detached: z.boolean(),
+          head_commit: z.string().optional(),
+          dirty: z.boolean(),
+        }),
+        instruction_sources: z.array(z.string()).optional(),
+        instructions: z.string().optional(),
+        instructions_truncated: z.literal(true).optional(),
+        skills: z.array(workspaceSkillOutputSchema).optional(),
+        agent_providers: z.array(codexWorkspaceLocalAgentProviderOutputSchema).optional(),
+        agents: z.array(codexWorkspaceLocalAgentOutputSchema).optional(),
+        skill_diagnostics: z.array(z.unknown()).optional(),
+      } : {
         workspaceId: z.string(),
         root: z.string(),
         mode: z.enum(["checkout", "worktree"]),
@@ -971,9 +1090,13 @@ function createMcpServer(
         skillDiagnostics: z.array(z.unknown()),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ path, mode, baseRef }) => {
+    async (rawInput: unknown) => {
+      const input = rawInput as Record<string, unknown>;
+      const path = input.path as string;
+      const mode = input.mode as "checkout" | "worktree" | undefined;
+      const baseRef = (config.toolMode === "codex" ? input.base_ref : input.baseRef) as string | undefined;
       const startedAt = performance.now();
       const { workspace, instructionChain } = await workspaces.openWorkspace({ path, mode, baseRef });
       const gitState = await workspaceGitState(workspace.root);
@@ -1011,7 +1134,7 @@ function createMcpServer(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return {
+      const sharedResult = {
         content: resultContent,
         _meta: {
           tool: "open_workspace",
@@ -1028,6 +1151,53 @@ function createMcpServer(
             },
           },
         },
+      };
+      if (config.toolMode === "codex") {
+        const codexAgents = visibleAgents.map((agent) => ({
+          name: agent.name,
+          description: agent.description,
+          provider: agent.provider,
+          model: agent.model,
+          thinking: agent.thinking,
+          provider_available: agent.providerAvailable,
+          provider_unavailable_reason: agent.providerUnavailableReason,
+        }));
+        return {
+          ...sharedResult,
+          structuredContent: {
+            workspace_id: workspace.id,
+            root: workspace.root,
+            mode: workspace.mode,
+            source_root: workspace.sourceRoot,
+            worktree: workspace.worktree ? {
+              path: workspace.worktree.path,
+              base_ref: workspace.worktree.baseRef,
+              base_sha: workspace.worktree.baseSha,
+              dirty_source: workspace.worktree.dirtySource,
+              detached: workspace.worktree.detached,
+              managed: workspace.worktree.managed,
+            } : undefined,
+            git: {
+              is_repository: gitState.isRepository,
+              branch: gitState.branch,
+              detached: gitState.detached,
+              head_commit: gitState.headCommit,
+              dirty: gitState.dirty,
+            },
+            ...(instructionSources.length > 0 ? { instruction_sources: instructionSources } : {}),
+            ...(instructionChain.instructions ? { instructions: instructionChain.instructions } : {}),
+            ...(instructionChain.truncated ? { instructions_truncated: true as const } : {}),
+            ...(visibleSkills.length > 0 ? { skills: visibleSkills } : {}),
+            ...(visibleAgentProviders.length > 0 ? { agent_providers: visibleAgentProviders } : {}),
+            ...(codexAgents.length > 0 ? { agents: codexAgents } : {}),
+            ...(workspace.skillDiagnostics.length > 0
+              ? { skill_diagnostics: workspace.skillDiagnostics }
+              : {}),
+          },
+        };
+      }
+      return {
+        ...sharedResult,
         structuredContent: {
           workspaceId: workspace.id,
           root: workspace.root,
@@ -1053,8 +1223,15 @@ function createMcpServer(
     {
       title: "Read file",
       description:
-        "Read a bounded line range from a text file inside an open workspace. Use this for targeted inspection of a known file. Use exec_command for searches, filtering, logs, generated output, or multi-file inspection.",
-      inputSchema: z.object({
+        config.toolMode === "codex"
+          ? "Read a bounded line range from a known text file inside an open workspace. Use exec_command for search, filtering, logs, generated output, or multi-file inspection."
+          : "Read a bounded line range from a text file inside an open workspace. Use this for targeted inspection of a known file. Use exec_command for searches, filtering, logs, generated output, or multi-file inspection.",
+      inputSchema: config.toolMode === "codex" ? z.object({
+        workspace_id: z.string().describe("Workspace returned by open_workspace."),
+        path: z.string().describe("Workspace-relative text-file path."),
+        offset: z.number().int().positive().optional().describe("One-based first line. Defaults to 1."),
+        limit: z.number().int().positive().optional().describe("Maximum number of lines to return."),
+      }).strict() : z.object({
         workspaceId: z
           .string()
           .describe("Workspace identifier returned by open_workspace."),
@@ -1078,7 +1255,18 @@ function createMcpServer(
           .optional()
           .describe("Maximum number of lines to read."),
       }).strict(),
-      outputSchema: {
+      outputSchema: config.toolMode === "codex" ? {
+        status: z.literal("instructions_required").optional(),
+        instruction_sources: z.array(z.string()).optional(),
+        instructions: z.string().optional(),
+        retry_required: z.boolean().optional(),
+        path: z.string().optional(),
+        start_line: z.number().int().positive().optional(),
+        end_line: z.number().int().nonnegative().optional(),
+        total_lines: z.number().int().nonnegative().optional(),
+        content: z.string().optional(),
+        truncated: z.literal(true).optional(),
+      } : {
         status: z.literal("instructions_required").optional(),
         instructionSources: z.array(z.string()).optional(),
         instructions: z.string().optional(),
@@ -1093,7 +1281,14 @@ function createMcpServer(
       ...toolWidgetDescriptorMeta(config, "read"),
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, ...input }) => {
+    async (rawInput: unknown) => {
+      const values = rawInput as Record<string, unknown>;
+      const workspaceId = (config.toolMode === "codex" ? values.workspace_id : values.workspaceId) as string;
+      const input = {
+        path: values.path as string,
+        offset: values.offset as number | undefined,
+        limit: values.limit as number | undefined,
+      };
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const readPath = workspaces.resolveReadPath(workspace, input.path);
@@ -1102,7 +1297,7 @@ function createMcpServer(
         : await workspaces.isDirectInstructionRead(workspace, input.path);
       if (!readPath.skillRead && !directInstructionRead) {
         const preflight = await workspaces.preflightInstructions(workspace, dirname(readPath.absolutePath));
-        if (preflight) return instructionPreflightResponse(preflight);
+        if (preflight) return instructionPreflightResponse(preflight, config.toolMode === "codex");
       }
       let result;
       try {
@@ -1151,7 +1346,14 @@ function createMcpServer(
             },
           },
         },
-        structuredContent: result,
+        structuredContent: config.toolMode === "codex" ? {
+          path: result.path,
+          start_line: result.startLine,
+          end_line: result.endLine,
+          total_lines: result.totalLines,
+          content: result.content,
+          ...(result.truncated ? { truncated: true as const } : {}),
+        } : result,
       };
     },
   );
@@ -1342,17 +1544,17 @@ function createMcpServer(
     const patchOperationSchema = z.discriminatedUnion("type", [
       z.object({
         type: z.literal("create_file"),
-        path: z.string().min(1),
-        diff: z.string(),
+        path: z.string().min(1).describe("Workspace-relative path for a file that must not already exist."),
+        diff: z.string().describe("Complete new file as a V4A creation diff. Prefix every content line with + and do not include an @@ hunk header."),
       }).strict(),
       z.object({
         type: z.literal("update_file"),
-        path: z.string().min(1),
-        diff: z.string(),
+        path: z.string().min(1).describe("Workspace-relative path for an existing file."),
+        diff: z.string().describe("V4A update diff containing one or more @@ hunks."),
       }).strict(),
       z.object({
         type: z.literal("delete_file"),
-        path: z.string().min(1),
+        path: z.string().min(1).describe("Workspace-relative path for an existing file to delete."),
       }).strict(),
     ]);
     registerAppTool(
@@ -1361,20 +1563,20 @@ function createMcpServer(
       {
         title: "Apply patch",
         description:
-          "Apply one structured text-file operation inside an open workspace. Use create_file, update_file, or delete_file. For create and update operations, diff is a bare V4A diff and must not include *** Begin Patch or file-header wrappers. Paths are relative to the workspace root.",
+          "Apply one structured text-file create, update, or delete operation inside an open workspace. Do not use *** Begin Patch or file-header wrappers.",
         inputSchema: z.object({
-          workspaceId: z
+          workspace_id: z
             .string()
             .min(1)
-            .describe("Workspace identifier returned by open_workspace."),
+            .describe("Workspace returned by open_workspace."),
           operation: patchOperationSchema,
         }).strict(),
         outputSchema: {
           status: z.enum(["completed", "failed", "instructions_required"]),
-          instructionSources: z.array(z.string()).optional(),
+          instruction_sources: z.array(z.string()).optional(),
           instructions: z.string().optional(),
           truncated: z.boolean().optional(),
-          retryRequired: z.boolean().optional(),
+          retry_required: z.boolean().optional(),
           operation: z.enum(["create_file", "update_file", "delete_file"]).optional(),
           path: z.string().optional(),
           changed: z.boolean().optional(),
@@ -1384,13 +1586,14 @@ function createMcpServer(
         ...toolWidgetDescriptorMeta(config, "edit"),
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
-      async ({ workspaceId, operation }) => {
+      async ({ workspace_id, operation }) => {
         const startedAt = performance.now();
+        const workspaceId = workspace_id;
         const workspace = workspaces.getWorkspace(workspaceId);
         try {
           const target = workspaces.resolvePath(workspace, operation.path);
           const preflight = await workspaces.preflightInstructions(workspace, dirname(target));
-          if (preflight) return instructionPreflightResponse(preflight);
+          if (preflight) return instructionPreflightResponse(preflight, true);
           const applied = await applyStructuredPatch(workspace.root, operation as StructuredPatchOperation);
           logToolCall(config, {
             tool: "apply_patch",
@@ -1401,7 +1604,13 @@ function createMcpServer(
           });
           return {
             content: [textBlock(`${operation.type} completed for ${operation.path}.`)],
-            structuredContent: { ...applied },
+            structuredContent: {
+              status: applied.status,
+              operation: applied.operation,
+              path: applied.path,
+              changed: applied.changed,
+              ...(applied.fuzz > 0 ? { fuzz: applied.fuzz } : {}),
+            },
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : "File operation failed; inspect the path and retry.";

@@ -120,6 +120,16 @@ try {
     await registry.preflightInstructions(opened.workspace, join(root, "services", "payments")),
     undefined,
   );
+
+  await rm(join(root, "AGENTS.md"));
+  await mkdir(join(root, "empty-scope"));
+  await writeFile(join(root, "empty-scope", "AGENTS.md"), "  \n");
+  const emptyRegistry = new WorkspaceRegistry(config);
+  const emptyWorkspace = await emptyRegistry.openWorkspace(root);
+  assert.equal(
+    await emptyRegistry.preflightInstructions(emptyWorkspace.workspace, join(root, "empty-scope")),
+    undefined,
+  );
 } finally {
   await rm(root, { recursive: true, force: true });
   await rm(outside, { recursive: true, force: true });
