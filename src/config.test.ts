@@ -26,6 +26,13 @@ assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
 assert.equal(loadConfig(baseEnv).subagents, false);
+assert.deepEqual(loadConfig(baseEnv).exports, {
+  ttlSeconds: 300,
+  maxBytes: 104857600,
+  cleanupIntervalSeconds: 60,
+  maxEntries: 64,
+  maxTotalBytes: 536870912,
+});
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "1" }).skillsEnabled, true);
 assert.equal(
@@ -125,6 +132,23 @@ assert.equal(
     .refreshTokenTtlSeconds,
   240,
 );
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_EXPORT_TTL_SECONDS: "10",
+    DEVSPACE_EXPORT_MAX_BYTES: "20",
+    DEVSPACE_EXPORT_CLEANUP_INTERVAL_SECONDS: "30",
+    DEVSPACE_EXPORT_MAX_ENTRIES: "40",
+    DEVSPACE_EXPORT_MAX_TOTAL_BYTES: "50",
+  }).exports,
+  {
+    ttlSeconds: 10,
+    maxBytes: 20,
+    cleanupIntervalSeconds: 30,
+    maxEntries: 40,
+    maxTotalBytes: 50,
+  },
+);
 
 assert.throws(
   () => loadConfig({ DEVSPACE_CONFIG_DIR: emptyConfigDir, DEVSPACE_ALLOWED_ROOTS: process.cwd() }),
@@ -137,6 +161,10 @@ assert.throws(
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "0" }),
   /Invalid DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS: 0/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_EXPORT_MAX_BYTES: "0" }),
+  /Invalid DEVSPACE_EXPORT_MAX_BYTES: 0/,
 );
 
 assert.equal(loadConfig(baseEnv).publicBaseUrl, "http://127.0.0.1:7676");

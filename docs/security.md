@@ -86,6 +86,25 @@ Filesystem path containment applies to DevSpace file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
 client must be trusted and the Owner password must stay private.
 
+## File Export Links
+
+`export_file` is workspace-scoped and accepts only relative paths that resolve
+to regular files inside the open workspace. DevSpace copies the file to a
+private temporary snapshot before creating the link, so later edits to the
+workspace file cannot change an existing download.
+
+Download URLs are intentionally accessible without OAuth. Each URL contains a
+256-bit random bearer token, expires after five minutes by default, is returned
+only to the authenticated MCP caller, and is redacted from request logs. Treat
+an unexpired URL like a secret: anyone who receives it can download that one
+snapshot. Responses disable caching and content sniffing. Per-file, entry-count,
+and aggregate-byte limits bound temporary storage use.
+
+The snapshot directory is process-specific under the operating system temporary
+directory. Expired snapshots are deleted periodically; all remaining snapshots
+are deleted during a clean shutdown. Normal operating-system temporary-file
+cleanup remains a fallback after an unclean exit.
+
 ## Worktrees
 
 Managed worktrees reduce accidental edits to your active checkout, but they are
@@ -96,5 +115,9 @@ sessions.
 
 By default, DevSpace logs requests and tool calls. Shell command previews are
 disabled unless `DEVSPACE_LOG_SHELL_COMMANDS=1`.
+
+File export tokens are never included in request or export event logs. Export
+events include only metadata such as size, MIME type, expiry, and a short hash
+prefix.
 
 Do not enable shell command logging if commands may contain secrets.

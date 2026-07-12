@@ -230,8 +230,7 @@ async function serve(): Promise<void> {
 
   const shutdown = () => {
     httpServer.close(() => {
-      close();
-      process.exit(0);
+      void close().finally(() => process.exit(0));
     });
   };
   process.once("SIGINT", shutdown);

@@ -136,6 +136,7 @@ DevSpace gives ChatGPT tools to:
 - read, write, and edit files inside the opened workspace
 - search code and inspect directories
 - run shell commands for tests, builds, git, and package scripts
+- create short-lived download links for generated files without putting binary data in tool output
 - use isolated Git worktrees for parallel coding sessions
 - follow project instructions from `AGENTS.md` and `CLAUDE.md`
 - discover local agent skills from your skill folders

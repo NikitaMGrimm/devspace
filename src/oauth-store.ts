@@ -34,7 +34,15 @@ function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boole
   }
 
   if (["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) return true;
-  return allowedHosts.includes(parsed.hostname);
+  const redirectHost = parsed.hostname.toLowerCase();
+  return allowedHosts.some((allowedHost) => {
+    const normalizedAllowedHost = allowedHost.trim().toLowerCase();
+    return (
+      normalizedAllowedHost.length > 0 &&
+      (redirectHost === normalizedAllowedHost ||
+        redirectHost.endsWith(`.${normalizedAllowedHost}`))
+    );
+  });
 }
 
 export class SqliteOAuthStore {
@@ -57,7 +65,18 @@ export class SqliteOAuthStore {
     client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
     allowedRedirectHosts: string[],
   ): OAuthClientInformationFull {
-    if (!client.redirect_uris.every((uri) => redirectHostAllowed(String(uri), allowedRedirectHosts))) {
+    const rejectedRedirectUris = client.redirect_uris
+      .map((uri) => String(uri))
+      .filter((uri) => !redirectHostAllowed(uri, allowedRedirectHosts));
+    if (rejectedRedirectUris.length > 0) {
+      const rejectedRedirectHosts = rejectedRedirectUris.map((uri) => {
+        try {
+          return new URL(uri).hostname;
+        } catch {
+          return "<invalid>";
+        }
+      });
+      console.warn(JSON.stringify({ event: "oauth_registration_rejected", rejectedRedirectHosts }));
       throw new InvalidRequestError("Client redirect_uri is not allowed for this DevSpace server");
     }
 

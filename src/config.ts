@@ -9,6 +9,19 @@ export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEFAULT_EXPORT_TTL_SECONDS = 5 * 60;
+const DEFAULT_EXPORT_MAX_BYTES = 100 * 1024 * 1024;
+const DEFAULT_EXPORT_CLEANUP_INTERVAL_SECONDS = 60;
+const DEFAULT_EXPORT_MAX_ENTRIES = 64;
+const DEFAULT_EXPORT_MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+
+export interface ExportConfig {
+  ttlSeconds: number;
+  maxBytes: number;
+  cleanupIntervalSeconds: number;
+  maxEntries: number;
+  maxTotalBytes: number;
+}
 
 export interface ServerConfig {
   host: string;
@@ -27,6 +40,7 @@ export interface ServerConfig {
   devspaceAgentsDir: string;
   subagents: boolean;
   agentDir: string;
+  exports: ExportConfig;
   logging: LoggingConfig;
 }
 
@@ -187,6 +201,36 @@ function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined
   };
 }
 
+function parseExportConfig(env: NodeJS.ProcessEnv): ExportConfig {
+  return {
+    ttlSeconds: parsePositiveInteger(
+      env.DEVSPACE_EXPORT_TTL_SECONDS,
+      DEFAULT_EXPORT_TTL_SECONDS,
+      "DEVSPACE_EXPORT_TTL_SECONDS",
+    ),
+    maxBytes: parsePositiveInteger(
+      env.DEVSPACE_EXPORT_MAX_BYTES,
+      DEFAULT_EXPORT_MAX_BYTES,
+      "DEVSPACE_EXPORT_MAX_BYTES",
+    ),
+    cleanupIntervalSeconds: parsePositiveInteger(
+      env.DEVSPACE_EXPORT_CLEANUP_INTERVAL_SECONDS,
+      DEFAULT_EXPORT_CLEANUP_INTERVAL_SECONDS,
+      "DEVSPACE_EXPORT_CLEANUP_INTERVAL_SECONDS",
+    ),
+    maxEntries: parsePositiveInteger(
+      env.DEVSPACE_EXPORT_MAX_ENTRIES,
+      DEFAULT_EXPORT_MAX_ENTRIES,
+      "DEVSPACE_EXPORT_MAX_ENTRIES",
+    ),
+    maxTotalBytes: parsePositiveInteger(
+      env.DEVSPACE_EXPORT_MAX_TOTAL_BYTES,
+      DEFAULT_EXPORT_MAX_TOTAL_BYTES,
+      "DEVSPACE_EXPORT_MAX_TOTAL_BYTES",
+    ),
+  };
+}
+
 function defaultStateDir(): string {
   return join(homedir(), ".local", "share", "devspace");
 }
@@ -235,6 +279,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         ? files.config.subagents === true
         : parseBoolean(env.DEVSPACE_SUBAGENTS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    exports: parseExportConfig(env),
     logging: parseLoggingConfig(env),
   };
 }

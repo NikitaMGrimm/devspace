@@ -43,6 +43,12 @@ import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
 import {
+  DevSpaceExportManager,
+  ExportFileError,
+  exportToolResult,
+  redactExportRequestPath,
+} from "./export-manager.js";
+import {
   formatLocalAgentProviderAvailabilitySummary,
   getLocalAgentProviderAvailabilitySnapshot,
   type LocalAgentProviderAvailability,
@@ -74,7 +80,7 @@ interface RunningServer {
   app: ReturnType<typeof createMcpExpressApp>;
   config: ServerConfig;
   localAgentProviders: LocalAgentProviderAvailability[];
-  close(): void;
+  close(): Promise<void>;
 }
 
 type ToolContent =
@@ -167,6 +173,9 @@ interface ToolLogFields {
   success: boolean;
   durationMs: number;
   error?: string;
+  size?: number;
+  mimeType?: string;
+  sha256Prefix?: string;
 }
 
 function serverInstructions(config: ServerConfig): string {
@@ -679,6 +688,7 @@ function createMcpServer(
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   localAgentProviders: LocalAgentProviderAvailability[],
+  exportManager: DevSpaceExportManager,
 ): McpServer {
   const server = new McpServer(
     {
@@ -721,6 +731,67 @@ function createMcpServer(
           },
         ],
       };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "export_file",
+    {
+      title: "Export file",
+      description:
+        "Create a short-lived HTTPS download link for a regular file in an open workspace. The file is copied to an immutable temporary snapshot and is never returned in tool output.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        path: z.string().describe("File path relative to the workspace root."),
+        downloadName: z.string().optional().describe("Optional safe attachment filename."),
+      },
+      outputSchema: {
+        url: z.string().url(),
+        name: z.string(),
+        mimeType: z.string(),
+        size: z.number().int().nonnegative(),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+        expiresAt: z.string(),
+      },
+      ...toolWidgetDescriptorMeta(config, "read"),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ workspaceId, path, downloadName }) => {
+      const startedAt = performance.now();
+      try {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const result = await exportManager.exportFile({
+          workspaceRoot: workspace.root,
+          path,
+          downloadName,
+        });
+        logToolCall(config, {
+          tool: "export_file",
+          workspaceId,
+          size: result.size,
+          mimeType: result.mimeType,
+          sha256Prefix: result.sha256.slice(0, 12),
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return exportToolResult(result);
+      } catch (error) {
+        const message =
+          error instanceof ExportFileError
+            ? error.message
+            : error instanceof Error && error.message.startsWith("Unknown workspaceId:")
+              ? "Unknown workspace. Call open_workspace first."
+              : "Unable to export file.";
+        logToolCall(config, {
+          tool: "export_file",
+          workspaceId,
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        return { content: [textBlock(message)], isError: true };
+      }
     },
   );
 
@@ -1605,6 +1676,11 @@ export function createServer(config = loadConfig()): RunningServer {
   });
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const exportManager = new DevSpaceExportManager({
+    publicBaseUrl: config.publicBaseUrl,
+    ...config.exports,
+    log: (level, event, fields) => logEvent(config.logging, level, event, fields),
+  });
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
   const localAgentProviders = config.subagents
@@ -1612,7 +1688,7 @@ export function createServer(config = loadConfig()): RunningServer {
     : [];
 
   if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
+    app.set("trust proxy", 1);
   }
 
   app.use((req, res, next) => {
@@ -1621,7 +1697,7 @@ export function createServer(config = loadConfig()): RunningServer {
     res.locals.requestId = requestId;
 
     res.on("finish", () => {
-      const path = requestPath(req);
+      const path = redactExportRequestPath(requestPath(req));
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 
@@ -1638,6 +1714,34 @@ export function createServer(config = loadConfig()): RunningServer {
     next();
   });
 
+  const handleDownload = async (req: Request, res: Response): Promise<void> => {
+    try {
+      await exportManager.handleHttp(req, res, String(req.params.token));
+    } catch {
+      if (res.headersSent) res.destroy();
+      else res.sendStatus(404);
+    }
+  };
+  app.head("/devspace-files/d/:token", handleDownload);
+  app.get("/devspace-files/d/:token", handleDownload);
+
+  app.get("/.well-known/openid-configuration", (_req, res) => {
+    const baseUrl = config.publicBaseUrl.replace(/\/$/u, "");
+    res.json({
+      issuer: `${baseUrl}/`,
+      authorization_endpoint: `${baseUrl}/authorize`,
+      token_endpoint: `${baseUrl}/token`,
+      registration_endpoint: `${baseUrl}/register`,
+      revocation_endpoint: `${baseUrl}/revoke`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+      revocation_endpoint_auth_methods_supported: ["client_secret_post"],
+      code_challenge_methods_supported: ["S256"],
+      scopes_supported: config.oauth.scopes,
+    });
+  });
+
   app.use(
     mcpAuthRouter({
       provider: oauthProvider,
@@ -1646,6 +1750,7 @@ export function createServer(config = loadConfig()): RunningServer {
       resourceServerUrl,
       scopesSupported: config.oauth.scopes,
       resourceName: "DevSpace",
+      clientRegistrationOptions: { rateLimit: false },
     }),
   );
 
@@ -1739,6 +1844,7 @@ export function createServer(config = loadConfig()): RunningServer {
           reviewCheckpoints,
           processSessions,
           localAgentProviders,
+          exportManager,
         );
         await server.connect(transport);
       } else {
@@ -1763,12 +1869,13 @@ export function createServer(config = loadConfig()): RunningServer {
     app,
     config,
     localAgentProviders,
-    close: () => {
+    close: async () => {
       if (closed) return;
       closed = true;
       processSessions.shutdown();
       oauthProvider.close();
       workspaceStore.close?.();
+      await exportManager.close();
     },
   };
 }
@@ -1800,8 +1907,7 @@ if (await isMainModule()) {
 
   const shutdown = () => {
     httpServer.close(() => {
-      close();
-      process.exit(0);
+      void close().finally(() => process.exit(0));
     });
   };
   process.once("SIGINT", shutdown);

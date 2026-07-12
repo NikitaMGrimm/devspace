@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  InvalidRequestError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { databasePath, openDatabase } from "./db/client.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
@@ -24,9 +28,44 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
+  testRedirectHostPolicy(join(root, "redirect-hosts"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function testRedirectHostPolicy(stateDir: string): void {
+  const store = new SqliteOAuthStore(stateDir);
+  const clients = new SqliteOAuthClientsStore(store, ["chatgpt.com"]);
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...values: unknown[]) => warnings.push(values.map(String).join(" "));
+
+  try {
+    const subdomainClient = clients.registerClient({
+      redirect_uris: ["https://connector.chatgpt.com/oauth/callback"],
+    });
+    assert.match(subdomainClient.client_id, /^devspace-/u);
+
+    clients.registerClient({ redirect_uris: ["http://localhost:3210/callback"] });
+    clients.registerClient({ redirect_uris: ["http://127.0.0.1:3210/callback"] });
+    clients.registerClient({ redirect_uris: ["http://[::1]:3210/callback"] });
+
+    assert.throws(
+      () =>
+        clients.registerClient({
+          redirect_uris: ["https://notchatgpt.com/oauth/callback?secret=do-not-log"],
+        }),
+      InvalidRequestError,
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /oauth_registration_rejected/u);
+    assert.match(warnings[0] ?? "", /notchatgpt\.com/u);
+    assert.doesNotMatch(warnings[0] ?? "", /oauth\/callback|do-not-log/u);
+  } finally {
+    console.warn = originalWarn;
+    store.close();
+  }
 }
 
 async function testDatabaseConfiguration(stateDir: string): Promise<void> {

@@ -55,7 +55,31 @@ MCP clients discover metadata from:
 ```text
 /.well-known/oauth-protected-resource/mcp
 /.well-known/oauth-authorization-server
+/.well-known/openid-configuration
 ```
+
+Each entry in `DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS` allows that exact host and
+its subdomains. For example, `chatgpt.com` also permits
+`connector.chatgpt.com`, but not `notchatgpt.com`. Loopback redirect hosts are
+always permitted.
+
+## File Exports
+
+The `export_file` tool creates an immutable temporary snapshot and returns a
+short-lived download URL. The URL serves `GET` and `HEAD` without OAuth because
+its 256-bit random token is the download credential.
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `DEVSPACE_EXPORT_TTL_SECONDS` | `300` | Lifetime of each download URL. |
+| `DEVSPACE_EXPORT_MAX_BYTES` | `104857600` | Maximum size of one exported file (100 MiB). |
+| `DEVSPACE_EXPORT_MAX_ENTRIES` | `64` | Maximum number of live exports. |
+| `DEVSPACE_EXPORT_MAX_TOTAL_BYTES` | `536870912` | Maximum total live snapshot size (512 MiB). |
+| `DEVSPACE_EXPORT_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for deleting expired snapshots. |
+
+Export paths must be relative to an open workspace and resolve to regular files
+inside it. Snapshots live in a private, process-specific directory under the
+operating system temporary directory and are removed at expiry or shutdown.
 
 ## Tool Modes
 
@@ -150,6 +174,9 @@ Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
 Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command
 previews in logs.
+
+When `DEVSPACE_TRUST_PROXY=1`, DevSpace trusts one reverse-proxy hop. Export
+download tokens are redacted from request logs.
 
 ## Env-Only Example
 
