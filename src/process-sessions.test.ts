@@ -112,6 +112,21 @@ await assert.rejects(
   /already exited or is unknown/,
 );
 
+const completedBeforePoll = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "setTimeout(() => console.log('already-done'), 20)"`,
+  yieldTimeMs: 0,
+});
+assert.equal(completedBeforePoll.running, true);
+await new Promise((resolve) => setTimeout(resolve, 75));
+const quickPoll = await manager.write({
+  workspaceId: "workspace-a",
+  sessionId: completedBeforePoll.sessionId!,
+});
+assert.equal(quickPoll.running, false);
+assert.ok(quickPoll.wallTimeMs < 50, `poll wall time should be per call, got ${quickPoll.wallTimeMs}ms`);
+
 const interactive = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),
@@ -204,7 +219,20 @@ if (!buffered.stdoutTruncated && buffered.sessionId) {
 }
 assert.equal(buffered.stdoutTruncated, true);
 assert.equal(buffered.stderrTruncated, true);
+assert.ok(Array.from(buffered.stdout + buffered.stderr).length <= 400);
+assert.ok((buffered.originalOutputTokens ?? 0) > 100);
 if (buffered.sessionId) manager.terminate("workspace-a", buffered.sessionId);
+
+const tinyBudget = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "process.stdout.write('abcdefgh'); process.stderr.write('ABCDEFGH')"`,
+  yieldTimeMs: 10_000,
+  maxOutputTokens: 1,
+});
+assert.ok(Array.from(tinyBudget.stdout + tinyBudget.stderr).length <= 4);
+assert.equal(tinyBudget.stdoutTruncated || tinyBudget.stderrTruncated, true);
+assert.equal(tinyBudget.originalOutputTokens, 4);
 
 try {
   if (process.platform === "win32") {

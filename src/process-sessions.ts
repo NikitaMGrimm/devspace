@@ -43,6 +43,7 @@ export interface ProcessSnapshot {
   stderr: string;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
+  originalOutputTokens?: number;
   running: boolean;
   timedOut: boolean;
   exitCode?: number;
@@ -185,11 +186,25 @@ export class HeadTailBuffer {
     return this.totalCharacters > 0;
   }
 
+  characterCount(): number {
+    return this.totalCharacters;
+  }
+
   drain(maxCharacters: number): { output: string; truncated: boolean } {
-    if (!Number.isInteger(maxCharacters) || maxCharacters < 1) {
-      throw new Error("Output limit must be a positive integer.");
+    const { output, truncated } = this.drainWithMetadata(maxCharacters);
+    return { output, truncated };
+  }
+
+  drainWithMetadata(maxCharacters: number): {
+    output: string;
+    truncated: boolean;
+    originalCharacters: number;
+  } {
+    if (!Number.isInteger(maxCharacters) || maxCharacters < 0) {
+      throw new Error("Output limit must be a non-negative integer.");
     }
 
+    const originalCharacters = this.totalCharacters;
     const omittedByBuffer = Math.max(
       0,
       this.totalCharacters - codePointLength(this.head) - codePointLength(this.tail),
@@ -202,16 +217,20 @@ export class HeadTailBuffer {
     this.tail = "";
     this.totalCharacters = 0;
 
-    return { output: output.output, truncated };
+    return { output: output.output, truncated, originalCharacters };
   }
 }
 
 function truncateOutput(output: string, maxCharacters: number): { output: string; truncated: boolean } {
   const outputCharacters = codePointLength(output);
   if (outputCharacters <= maxCharacters) return { output, truncated: false };
+  if (maxCharacters === 0) return { output: "", truncated: true };
 
   const marker = "\n... output truncated ...\n";
   const markerCharacters = codePointLength(marker);
+  if (markerCharacters >= maxCharacters) {
+    return { output: takeHead(output, maxCharacters), truncated: true };
+  }
   const available = Math.max(0, maxCharacters - markerCharacters);
   const budget = splitBudget(available);
   return {
@@ -232,6 +251,7 @@ export class ProcessSessionManager {
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
+    const callStartedAt = Date.now();
     const session = this.createSession(input);
     this.sessions.set(session.id, session);
 
@@ -259,12 +279,13 @@ export class ProcessSessionManager {
     const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_COMMAND_YIELD_MS);
     await this.waitForExit(session, yieldTimeMs);
 
-    const snapshot = this.consume(session, input.maxOutputTokens);
+    const snapshot = this.consume(session, input.maxOutputTokens, callStartedAt);
     if (!session.running) this.removeSession(session.id);
     return snapshot;
   }
 
   async write(input: WriteStdinInput): Promise<ProcessSnapshot> {
+    const callStartedAt = Date.now();
     const session = this.getOwnedSession(input.workspaceId, input.sessionId);
     const chars = input.chars ?? "";
     const interactionRequested =
@@ -296,7 +317,7 @@ export class ProcessSessionManager {
       await this.waitForExit(session, yieldTimeMs);
     }
 
-    const snapshot = this.consume(session, input.maxOutputTokens);
+    const snapshot = this.consume(session, input.maxOutputTokens, callStartedAt);
     if (!session.running) this.removeSession(session.id);
     return snapshot;
   }
@@ -430,11 +451,25 @@ export class ProcessSessionManager {
     (stream === "stdout" ? session.stdoutBuffer : session.stderrBuffer).append(output);
   }
 
-  private consume(session: ProcessSession, maxOutputTokens?: number): ProcessSnapshot {
+  private consume(
+    session: ProcessSession,
+    maxOutputTokens: number | undefined,
+    callStartedAt: number,
+  ): ProcessSnapshot {
     const limit = boundedInteger(maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
-    const maxCharacters = Math.max(256, limit * 4);
-    const stdout = session.stdoutBuffer.drain(maxCharacters);
-    const stderr = session.stderrBuffer.drain(maxCharacters);
+    const maxCharacters = limit * 4;
+    const stdoutCharacters = session.stdoutBuffer.characterCount();
+    const stderrCharacters = session.stderrBuffer.characterCount();
+    const totalCharacters = stdoutCharacters + stderrCharacters;
+    let stdoutBudget = Math.min(stdoutCharacters, maxCharacters);
+    if (totalCharacters > maxCharacters && stderrCharacters > 0) {
+      stdoutBudget = Math.floor(maxCharacters * stdoutCharacters / totalCharacters);
+      if (stdoutCharacters > 0 && maxCharacters > 1) stdoutBudget = Math.max(1, stdoutBudget);
+    }
+    const stderrBudget = Math.min(stderrCharacters, Math.max(0, maxCharacters - stdoutBudget));
+    const stdout = session.stdoutBuffer.drainWithMetadata(stdoutBudget);
+    const stderr = session.stderrBuffer.drainWithMetadata(stderrBudget);
+    const truncated = stdout.truncated || stderr.truncated;
 
     return {
       sessionId: session.running ? session.id : undefined,
@@ -442,11 +477,16 @@ export class ProcessSessionManager {
       stderr: stderr.output,
       stdoutTruncated: stdout.truncated,
       stderrTruncated: stderr.truncated,
+      ...(truncated ? {
+        originalOutputTokens: Math.ceil(
+          (stdout.originalCharacters + stderr.originalCharacters) / 4,
+        ),
+      } : {}),
       running: session.running,
       timedOut: session.timedOut,
       exitCode: session.exitCode,
       signal: session.signal,
-      wallTimeMs: Date.now() - session.startedAt,
+      wallTimeMs: Date.now() - callStartedAt,
     };
   }
 

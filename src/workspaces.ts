@@ -205,6 +205,7 @@ export class WorkspaceRegistry {
     if (workspace.deliveredInstructionHashes.get(chain.scope) === chain.hash) return undefined;
 
     workspace.deliveredInstructionHashes.set(chain.scope, chain.hash);
+    if (chain.instructions.length === 0) return undefined;
     return {
       status: "instructions_required",
       instructionSources: chain.sources.map((source) => formatAgentsPath(source.path, workspace.root)),
