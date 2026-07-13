@@ -135,7 +135,7 @@ export function summaryNumber(
 export function isExpandableCard(card: ToolResultCard): boolean {
   if (card.tool === "open_workspace") {
     return (
-      Number(card.summary?.agentsFiles ?? 0) > 0 ||
+      Number(card.summary?.instructionSources ?? 0) > 0 ||
       Number(card.summary?.skills ?? 0) > 0 ||
       Number(card.summary?.skillDiagnostics ?? 0) > 0 ||
       Boolean(card.agentsFiles?.length) ||

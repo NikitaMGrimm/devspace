@@ -23,3 +23,11 @@ assert.equal(
   true,
 );
 assert.equal(isExpandableCard({ tool: "apply_patch" }), false);
+assert.equal(
+  isExpandableCard({ tool: "open_workspace", summary: { instructionSources: 1 } }),
+  true,
+);
+assert.equal(
+  isExpandableCard({ tool: "open_workspace", summary: { instructionSources: 0 } }),
+  false,
+);

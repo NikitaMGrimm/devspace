@@ -354,16 +354,16 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
   }
 
   if (card.tool === "open_workspace") {
-    const agentsFiles = summaryNumber(summary, "agentsFiles") ?? 0;
+    const instructionSources = summaryNumber(summary, "instructionSources") ?? 0;
     const skills = summaryNumber(summary, "skills") ?? 0;
     const group = element("span", { className: "badge-group" });
     group.setAttribute("aria-label", "Workspace summary");
 
     const agentsBadge = element("span", {
-      className: `badge ${agentsFiles > 0 ? "success" : "muted"}`,
-      text: agentsFiles > 0 ? "AGENTS.md" : "No AGENTS.md",
+      className: `badge ${instructionSources > 0 ? "success" : "muted"}`,
+      text: instructionSources > 0 ? "AGENTS.md" : "No AGENTS.md",
     });
-    if (agentsFiles > 0) {
+    if (instructionSources > 0) {
       agentsBadge.insertAdjacentHTML("afterbegin", checkCircleIcon());
     }
 
