@@ -24,10 +24,10 @@ assert.equal(
 );
 assert.equal(isExpandableCard({ tool: "apply_patch" }), false);
 assert.equal(
-  isExpandableCard({ tool: "open_workspace", summary: { instructionSources: 1 } }),
+  isExpandableCard({ tool: "open_workspace", instructionSources: ["AGENTS.md"] }),
   true,
 );
 assert.equal(
-  isExpandableCard({ tool: "open_workspace", summary: { instructionSources: 0 } }),
+  isExpandableCard({ tool: "open_workspace", instructionSources: [] }),
   false,
 );

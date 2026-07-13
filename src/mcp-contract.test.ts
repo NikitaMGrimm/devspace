@@ -112,6 +112,8 @@ try {
 
   const opened = await client.callTool({ name: "open_workspace", arguments: { path: root } });
   const workspace = opened.structuredContent as Record<string, unknown>;
+  const workspaceCard = (opened._meta as Record<string, unknown>).card as Record<string, unknown>;
+  assert.deepEqual(workspaceCard.instructionSources, ["AGENTS.md"]);
   const workspaceId = workspace.workspace_id as string;
   const reopened = await client.callTool({ name: "open_workspace", arguments: { path: root } });
   assert.equal(

@@ -25,6 +25,7 @@ export interface ToolResultCard {
   root?: string;
   status?: string;
   summary?: Record<string, unknown>;
+  instructionSources?: string[];
   files?: Array<{
     path?: string;
     previousPath?: string;
@@ -34,13 +35,6 @@ export interface ToolResultCard {
     removals?: number;
   }>;
   payload?: ToolPayload;
-  agentsFiles?: Array<{
-    path?: string;
-    content?: string;
-  }>;
-  availableAgentsFiles?: Array<{
-    path?: string;
-  }>;
   skills?: Array<{
     name?: string;
     description?: string;
@@ -135,11 +129,9 @@ export function summaryNumber(
 export function isExpandableCard(card: ToolResultCard): boolean {
   if (card.tool === "open_workspace") {
     return (
-      Number(card.summary?.instructionSources ?? 0) > 0 ||
       Number(card.summary?.skills ?? 0) > 0 ||
       Number(card.summary?.skillDiagnostics ?? 0) > 0 ||
-      Boolean(card.agentsFiles?.length) ||
-      Boolean(card.availableAgentsFiles?.length) ||
+      Boolean(card.instructionSources?.length) ||
       Boolean(card.skills?.length) ||
       Boolean(card.skillDiagnostics?.length)
     );

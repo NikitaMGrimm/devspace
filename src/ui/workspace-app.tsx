@@ -24,6 +24,7 @@ import {
   type ToolResultCard,
 } from "./card-types.js";
 import { getPatchDisplayParts } from "./patch-display.js";
+import { workspacePayloadText } from "./workspace-card.js";
 import "./workspace-app.css";
 
 interface ToolDisplay {
@@ -354,7 +355,7 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
   }
 
   if (card.tool === "open_workspace") {
-    const instructionSources = summaryNumber(summary, "instructionSources") ?? 0;
+    const instructionSources = card.instructionSources?.length ?? 0;
     const skills = summaryNumber(summary, "skills") ?? 0;
     const group = element("span", { className: "badge-group" });
     group.setAttribute("aria-label", "Workspace summary");
@@ -458,39 +459,6 @@ function setPayloadLoading(container: HTMLElement, loading: boolean): void {
 
   const button = header instanceof HTMLButtonElement ? header : null;
   if (button) button.setAttribute("aria-busy", String(loading));
-}
-
-function workspacePayloadText(card: ToolResultCard): string {
-  const agentsFiles = card.agentsFiles ?? [];
-  const availableAgentsFiles = card.availableAgentsFiles ?? [];
-  const skills = card.skills ?? [];
-  const lines = [
-    card.workspaceId ? `Workspace: ${card.workspaceId}` : undefined,
-    card.root ? `Root: ${card.root}` : undefined,
-    skills.length > 0
-      ? `Skills: ${skills.map((skill) => skill.name ?? skill.resource ?? "unnamed").join(", ")}`
-      : "Skills: none",
-    availableAgentsFiles.length > 0
-      ? `Nested instructions: ${availableAgentsFiles.map((file) => file.path ?? "unknown").join(", ")}`
-      : undefined,
-    agentsFiles.length > 0
-      ? `\n${formatAgentsFilesForPayload(agentsFiles)}`
-      : "\nAGENTS.md: none loaded",
-  ].filter((line): line is string => typeof line === "string");
-
-  return lines.join("\n");
-}
-
-function formatAgentsFilesForPayload(
-  agentsFiles: NonNullable<ToolResultCard["agentsFiles"]>,
-): string {
-  return agentsFiles
-    .map((file) => {
-      const path = file.path ?? "AGENTS.md";
-      const content = file.content?.trim();
-      return content ? `${path}\n\n${content}` : `${path}\n\nNo content loaded.`;
-    })
-    .join("\n\n");
 }
 
 function getPatchToolDisplay(card: ToolResultCard, label: string): ToolDisplay {

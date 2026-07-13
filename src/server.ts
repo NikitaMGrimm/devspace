@@ -1170,8 +1170,8 @@ function createMcpServer(
             workspaceId: workspace.id,
             root: workspace.root,
             path: workspace.root,
+            instructionSources,
             summary: {
-              instructionSources: instructionSources.length,
               skills: visibleSkills.length,
               agentProviders: visibleAgentProviders.length,
               agents: visibleAgents.length,
