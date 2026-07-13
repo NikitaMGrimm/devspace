@@ -101,12 +101,14 @@ before use.
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
 When `open_workspace` returns matching skills, the model should read the
-advertised `SKILL.md` before following that skill.
+advertised `skill://` resource before following that skill. Skill resources are
+opaque references resolved by DevSpace; they do not expose host filesystem
+paths and can be passed unchanged to `read`.
 
-Skill paths may be outside the workspace. DevSpace only permits reading:
+DevSpace only permits reading:
 
-- advertised `SKILL.md` files
-- files under a skill directory after that skill's `SKILL.md` has been read
+- advertised `skill://.../SKILL.md` resources
+- resources beneath that skill URI after its `SKILL.md` has been read
 
 Set `DEVSPACE_SKILLS=0` to hide skills from workspace output. Set
 `DEVSPACE_SUBAGENTS=1` to expose the experimental subagent catalog and

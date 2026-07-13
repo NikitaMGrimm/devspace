@@ -44,7 +44,7 @@ export interface ToolResultCard {
   skills?: Array<{
     name?: string;
     description?: string;
-    path?: string;
+    resource?: string;
   }>;
   skillDiagnostics?: unknown[];
   instruction?: string;

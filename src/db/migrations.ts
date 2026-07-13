@@ -22,6 +22,11 @@ const migrations: Migration[] = [
     name: "local-agent-sessions",
     up: migrateLocalAgentSessions,
   },
+  {
+    version: 4,
+    name: "canonical-checkout-workspaces",
+    up: migrateCanonicalCheckoutWorkspaces,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -172,6 +177,27 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
   `);
 
   addColumnIfMissing(sqlite, "local_agent_sessions", "thinking", "text");
+}
+
+function migrateCanonicalCheckoutWorkspaces(sqlite: Database.Database): void {
+  sqlite.exec(`
+    with ranked as (
+      select id,
+             row_number() over (
+               partition by root
+               order by last_used_at desc, created_at desc, id desc
+             ) as duplicate_rank
+        from workspace_sessions
+       where mode = 'checkout' and status = 'active'
+    )
+    update workspace_sessions
+       set status = 'superseded'
+     where id in (select id from ranked where duplicate_rank > 1);
+
+    create unique index if not exists workspace_sessions_active_checkout_root_uidx
+      on workspace_sessions(root)
+      where mode = 'checkout' and status = 'active';
+  `);
 }
 
 function addColumnIfMissing(

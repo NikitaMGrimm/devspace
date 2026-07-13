@@ -39,7 +39,6 @@ import {
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
-import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
@@ -187,7 +186,7 @@ interface ToolLogFields {
 
 function serverInstructions(config: ServerConfig): string {
   if (config.toolMode === "codex") {
-    return "Call open_workspace once per project or worktree and reuse its workspace_id. Respect the project instructions it returns and any later instructions_required response. Use read for a known text file, exec_command for searches and commands, apply_patch for structured text edits, write_stdin for running sessions, and export_file for downloadable artifacts. Keep command output bounded.";
+    return "Call open_workspace once per project or worktree and reuse its workspace_id. Respect the project instructions it returns and any later instructions_required response. When a returned skill matches the task, read its advertised skill:// resource before proceeding; resolve referenced files beneath that resource. Use read for a known text file, exec_command for searches and commands, apply_patch for structured text edits, write_stdin for running sessions, and export_file for downloadable artifacts. Keep command output bounded.";
   }
 
   const inspection = config.toolMode !== "full"
@@ -195,7 +194,7 @@ function serverInstructions(config: ServerConfig): string {
     : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
 
   const skills = config.skillsEnabled
-    ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
+    ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's advertised resource before proceeding. Resolve relative files named by SKILL.md beneath the same skill resource; ${toolNames.read} permits them only after SKILL.md is loaded. `
     : "";
 
   const agentsMd = `Follow the project instructions returned by ${toolNames.openWorkspace}. If a tool returns instructions_required for a nested or changed scope, read those instructions and retry the original call. `;
@@ -237,8 +236,29 @@ function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
 const workspaceSkillOutputSchema = z.object({
   name: z.string(),
   description: z.string(),
-  path: z.string(),
+  resource: z.string(),
 });
+
+function modelSkillDiagnostics(
+  diagnostics: Array<{
+    type: string;
+    message: string;
+    collision?: { resourceType?: string; name?: string };
+  }>,
+): Array<Record<string, unknown>> {
+  return diagnostics.map((diagnostic) => ({
+    type: diagnostic.type,
+    message: diagnostic.message,
+    ...(diagnostic.collision
+      ? {
+          collision: {
+            resource_type: diagnostic.collision.resourceType,
+            name: diagnostic.collision.name,
+          },
+        }
+      : {}),
+  }));
+}
 
 const workspaceAgentsFileOutputSchema = z.object({
   path: z.string(),
@@ -703,7 +723,7 @@ function registerCodexProcessTools(
     async ({ workspace_id, cmd, tty, workdir, yield_time_ms, timeout_ms, max_output_tokens }) => {
       const startedAt = performance.now();
       const workspaceId = workspace_id;
-      const workspace = workspaces.getWorkspace(workspaceId);
+      const workspace = await workspaces.getWorkspace(workspaceId);
       const cwd = workspaces.resolveWorkingDirectory(workspace, workdir);
       const preflight = await workspaces.preflightInstructions(workspace, cwd);
       if (preflight) return instructionPreflightResponse(preflight, true);
@@ -778,7 +798,7 @@ function registerCodexProcessTools(
       const startedAt = performance.now();
       const workspaceId = workspace_id;
       const sessionId = session_id;
-      workspaces.getWorkspace(workspaceId);
+      await workspaces.getWorkspace(workspaceId);
       let snapshot: ProcessSnapshot;
       try {
         snapshot = await processSessions.write({
@@ -887,7 +907,7 @@ function createMcpServer(
   ) => {
     const startedAt = performance.now();
     try {
-      const workspace = workspaces.getWorkspace(workspaceId);
+      const workspace = await workspaces.getWorkspace(workspaceId);
       const target = workspaces.resolvePath(workspace, path);
       const preflight = await workspaces.preflightInstructions(workspace, dirname(target));
       if (preflight) return instructionPreflightResponse(preflight, codexResult);
@@ -1100,13 +1120,13 @@ function createMcpServer(
       const startedAt = performance.now();
       const { workspace, instructionChain } = await workspaces.openWorkspace({ path, mode, baseRef });
       const gitState = await workspaceGitState(workspace.root);
-      const visibleSkills = workspace.skills
-        .filter((skill) => !skill.disableModelInvocation)
-        .map((skill) => ({
+      const visibleSkills = workspace.skillResources
+        .map(({ skill, resource }) => ({
           name: skill.name,
           description: skill.description,
-          path: formatPathForPrompt(skill.filePath),
+          resource,
         }));
+      const visibleSkillDiagnostics = modelSkillDiagnostics(workspace.skillDiagnostics);
       const visibleAgentProviders = config.subagents ? localAgentProviders : [];
       const visibleAgents = workspace.agentProfiles.map((profile) => {
         const summary = summarizeLocalAgentProfile(profile);
@@ -1147,7 +1167,7 @@ function createMcpServer(
               skills: visibleSkills.length,
               agentProviders: visibleAgentProviders.length,
               agents: visibleAgents.length,
-              skillDiagnostics: workspace.skillDiagnostics.length,
+              skillDiagnostics: visibleSkillDiagnostics.length,
             },
           },
         },
@@ -1190,8 +1210,8 @@ function createMcpServer(
             ...(visibleSkills.length > 0 ? { skills: visibleSkills } : {}),
             ...(visibleAgentProviders.length > 0 ? { agent_providers: visibleAgentProviders } : {}),
             ...(codexAgents.length > 0 ? { agents: codexAgents } : {}),
-            ...(workspace.skillDiagnostics.length > 0
-              ? { skill_diagnostics: workspace.skillDiagnostics }
+            ...(visibleSkillDiagnostics.length > 0
+              ? { skill_diagnostics: visibleSkillDiagnostics }
               : {}),
           },
         };
@@ -1211,7 +1231,7 @@ function createMcpServer(
           skills: visibleSkills,
           agentProviders: visibleAgentProviders,
           agents: visibleAgents,
-          skillDiagnostics: workspace.skillDiagnostics,
+          skillDiagnostics: visibleSkillDiagnostics,
         },
       };
     },
@@ -1224,11 +1244,11 @@ function createMcpServer(
       title: "Read file",
       description:
         config.toolMode === "codex"
-          ? "Read a bounded line range from a known text file inside an open workspace. Use exec_command for search, filtering, logs, generated output, or multi-file inspection."
+          ? "Read a bounded line range from a known workspace text file or advertised skill resource. Use exec_command for search, filtering, logs, generated output, or multi-file inspection."
           : "Read a bounded line range from a text file inside an open workspace. Use this for targeted inspection of a known file. Use exec_command for searches, filtering, logs, generated output, or multi-file inspection.",
       inputSchema: config.toolMode === "codex" ? z.object({
         workspace_id: z.string().describe("Workspace returned by open_workspace."),
-        path: z.string().describe("Workspace-relative text-file path."),
+        path: z.string().describe("Workspace-relative text-file path or advertised skill:// resource."),
         offset: z.number().int().positive().optional().describe("One-based first line. Defaults to 1."),
         limit: z.number().int().positive().optional().describe("Maximum number of lines to return."),
       }).strict() : z.object({
@@ -1239,7 +1259,7 @@ function createMcpServer(
           .string()
           .describe(
             config.skillsEnabled
-              ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
+              ? "File path to read, relative to the workspace root. May also be an advertised skill resource from open_workspace skills."
               : "File path to read, relative to the workspace root.",
           ),
         offset: z
@@ -1290,7 +1310,7 @@ function createMcpServer(
         limit: values.limit as number | undefined,
       };
       const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
+      const workspace = await workspaces.getWorkspace(workspaceId);
       const readPath = workspaces.resolveReadPath(workspace, input.path);
       const directInstructionRead = readPath.skillRead
         ? false
@@ -1388,7 +1408,7 @@ function createMcpServer(
     },
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
+      const workspace = await workspaces.getWorkspace(workspaceId);
       const target = workspaces.resolvePath(workspace, input.path);
       const preflight = await workspaces.preflightInstructions(workspace, dirname(target));
       if (preflight) return instructionPreflightResponse(preflight);
@@ -1482,7 +1502,7 @@ function createMcpServer(
     },
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
+      const workspace = await workspaces.getWorkspace(workspaceId);
       const target = workspaces.resolvePath(workspace, input.path);
       const preflight = await workspaces.preflightInstructions(workspace, dirname(target));
       if (preflight) return instructionPreflightResponse(preflight);
@@ -1589,7 +1609,7 @@ function createMcpServer(
       async ({ workspace_id, operation }) => {
         const startedAt = performance.now();
         const workspaceId = workspace_id;
-        const workspace = workspaces.getWorkspace(workspaceId);
+        const workspace = await workspaces.getWorkspace(workspaceId);
         try {
           const target = workspaces.resolvePath(workspace, operation.path);
           const preflight = await workspaces.preflightInstructions(workspace, dirname(target));
@@ -1664,7 +1684,7 @@ function createMcpServer(
       },
       async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
-        const workspace = workspaces.getWorkspace(workspaceId);
+        const workspace = await workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
         const response = await grepFilesTool(input, {
           cwd: workspace.root,
@@ -1734,7 +1754,7 @@ function createMcpServer(
       },
       async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
-        const workspace = workspaces.getWorkspace(workspaceId);
+        const workspace = await workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
         const response = await findFilesTool(input, {
           cwd: workspace.root,
@@ -1804,7 +1824,7 @@ function createMcpServer(
       },
       async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
-        const workspace = workspaces.getWorkspace(workspaceId);
+        const workspace = await workspaces.getWorkspace(workspaceId);
         workspaces.resolvePath(workspace, input.path);
         const response = await listDirectoryTool(input, {
           cwd: workspace.root,
@@ -1890,7 +1910,7 @@ function createMcpServer(
     },
     async ({ workspaceId, workingDirectory, ...input }) => {
       const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
+      const workspace = await workspaces.getWorkspace(workspaceId);
       const cwd = workspaces.resolveWorkingDirectory(
         workspace,
         workingDirectory,

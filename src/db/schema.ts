@@ -1,4 +1,5 @@
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const workspaceSessions = sqliteTable(
   "workspace_sessions",
@@ -17,6 +18,9 @@ export const workspaceSessions = sqliteTable(
   (table) => [
     index("workspace_sessions_root_idx").on(table.root, table.lastUsedAt),
     index("workspace_sessions_status_idx").on(table.status, table.lastUsedAt),
+    uniqueIndex("workspace_sessions_active_checkout_root_uidx")
+      .on(table.root)
+      .where(sql`${table.mode} = 'checkout' and ${table.status} = 'active'`),
   ],
 );
 

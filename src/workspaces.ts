@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
 import { mkdir, realpath, stat } from "node:fs/promises";
-import { relative, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import type { ServerConfig } from "./config.js";
 import { git } from "./git.js";
 import { createManagedWorktree } from "./git-worktrees.js";
@@ -13,6 +13,8 @@ import {
   type ProjectInstructionChain,
 } from "./project-instructions.js";
 import {
+  createSkillResourceCatalog,
+  isSkillResource,
   loadWorkspaceSkills,
   markSkillActivated,
   resolveSkillReadPath,
@@ -49,9 +51,10 @@ export interface Workspace {
   sourceRoot?: string;
   worktree?: WorkspaceWorktree;
   skills: LoadedSkills["skills"];
+  skillResources: ReturnType<typeof createSkillResourceCatalog>;
   skillDiagnostics: LoadedSkills["diagnostics"];
   agentProfiles: LocalAgentProfile[];
-  activatedSkillDirs: Set<string>;
+  activatedSkillIds: Set<string>;
   deliveredInstructionHashes: Map<string, string>;
 }
 
@@ -90,6 +93,10 @@ type DirectoryOps = {
 
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
+  private readonly checkoutWorkspacesByRoot = new Map<string, Workspace>();
+  private readonly checkoutOpenPromises = new Map<string, Promise<Workspace>>();
+  private readonly workspaceRestorePromises = new Map<string, Promise<Workspace>>();
+  private readonly reconciledCheckoutRoots = new Set<string>();
 
   constructor(
     private readonly config: ServerConfig,
@@ -107,19 +114,48 @@ export class WorkspaceRegistry {
     return this.openCheckoutWorkspace(options.path);
   }
 
-  getWorkspace(workspaceId: string): Workspace {
+  async getWorkspace(workspaceId: string): Promise<Workspace> {
     const workspace = this.workspaces.get(workspaceId);
     if (workspace) {
       this.store?.touchSession(workspaceId);
       return workspace;
     }
 
+    const pending = this.workspaceRestorePromises.get(workspaceId);
+    if (pending) return pending;
+
+    const restoring = this.restoreWorkspace(workspaceId);
+    this.workspaceRestorePromises.set(workspaceId, restoring);
+    try {
+      return await restoring;
+    } finally {
+      if (this.workspaceRestorePromises.get(workspaceId) === restoring) {
+        this.workspaceRestorePromises.delete(workspaceId);
+      }
+    }
+  }
+
+  private async restoreWorkspace(workspaceId: string): Promise<Workspace> {
     const session = this.store?.getSession(workspaceId);
     if (!session) {
       throw new Error(`Unknown workspaceId: ${workspaceId}. Call open_workspace first.`);
     }
+    if (session.status !== "active") {
+      throw new Error(`Workspace ${workspaceId} is no longer active. Call open_workspace again.`);
+    }
 
-    const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+    const root = await this.assertStoredWorkspaceRootAllowed(
+      session.root,
+      session.mode,
+      session.sourceRoot,
+    );
+    if (session.mode === "checkout") {
+      await this.reconcileStoredCheckoutSessions(root);
+      if (this.store?.getSession(workspaceId)?.status !== "active") {
+        throw new Error(`Workspace ${workspaceId} is no longer active. Call open_workspace again.`);
+      }
+    }
+    const loadedSkills = this.loadSkillsForWorkspace(root);
     const restoredWorkspace: Workspace = {
       id: session.id,
       root,
@@ -136,13 +172,17 @@ export class WorkspaceRegistry {
               managed: session.managed,
             }
           : undefined,
-      ...this.loadSkillsForWorkspace(root),
-      agentProfiles: [],
-      activatedSkillDirs: new Set(),
+      ...loadedSkills,
+      skillResources: createSkillResourceCatalog(loadedSkills.skills),
+      agentProfiles: await loadLocalAgentProfiles(this.config, root),
+      activatedSkillIds: new Set(),
       deliveredInstructionHashes: new Map(),
     };
     this.store?.touchSession(workspaceId);
     this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+    if (session.mode === "checkout" && session.status === "active") {
+      this.checkoutWorkspacesByRoot.set(root, restoredWorkspace);
+    }
 
     return restoredWorkspace;
   }
@@ -157,18 +197,13 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
-    try {
-      return {
-        absolutePath: this.resolvePath(workspace, inputPath),
-        readRoots: [workspace.root],
-      };
-    } catch (workspaceError) {
+    if (isSkillResource(inputPath)) {
       const skillRead = resolveSkillReadPath(
-        workspace.skills,
-        workspace.activatedSkillDirs,
+        workspace.skillResources,
+        workspace.activatedSkillIds,
         inputPath,
       );
-      if (!skillRead) throw workspaceError;
+      if (!skillRead) throw new Error(`Unknown skill resource: ${inputPath}`);
 
       return {
         absolutePath: skillRead.absolutePath,
@@ -176,11 +211,16 @@ export class WorkspaceRegistry {
         skillRead,
       };
     }
+
+    return {
+      absolutePath: this.resolvePath(workspace, inputPath),
+      readRoots: [workspace.root],
+    };
   }
 
   markReadPathLoaded(workspace: Workspace, readPath: WorkspaceReadPath): void {
     if (readPath.skillRead?.isSkillFile) {
-      markSkillActivated(workspace.activatedSkillDirs, readPath.skillRead.skill);
+      markSkillActivated(workspace.activatedSkillIds, readPath.skillRead.resourceId);
     }
   }
 
@@ -235,8 +275,14 @@ export class WorkspaceRegistry {
       throw new Error(`Workspace root must be a directory: ${path}`);
     }
 
-    const root = await this.findProjectRoot(requestedRoot);
-    return this.createWorkspaceContext({ root, mode: "checkout", initialScope: requestedRoot });
+    const canonicalAllowedRoots = await this.canonicalAllowedRoots();
+    const canonicalRequestedRoot = assertAllowedPath(
+      await realpath(requestedRoot),
+      canonicalAllowedRoots,
+    );
+    const root = await this.findProjectRoot(canonicalRequestedRoot, canonicalAllowedRoots);
+    const workspace = await this.openCanonicalCheckoutWorkspace(root);
+    return this.createContext(workspace, canonicalRequestedRoot);
   }
 
   private async openWorktreeWorkspace(path: string, baseRef: string | undefined): Promise<WorkspaceContext> {
@@ -261,15 +307,17 @@ export class WorkspaceRegistry {
     worktree?: WorkspaceWorktree;
     initialScope?: string;
   }): Promise<WorkspaceContext> {
+    const loadedSkills = this.loadSkillsForWorkspace(input.root);
     const workspace: Workspace = {
       id: `ws_${randomUUID()}`,
       root: input.root,
       mode: input.mode,
       sourceRoot: input.sourceRoot,
       worktree: input.worktree,
-      ...this.loadSkillsForWorkspace(input.root),
+      ...loadedSkills,
+      skillResources: createSkillResourceCatalog(loadedSkills.skills),
       agentProfiles: await loadLocalAgentProfiles(this.config, input.root),
-      activatedSkillDirs: new Set(),
+      activatedSkillIds: new Set(),
       deliveredInstructionHashes: new Map(),
     };
 
@@ -283,10 +331,14 @@ export class WorkspaceRegistry {
       managed: workspace.worktree?.managed,
     });
     this.workspaces.set(workspace.id, workspace);
-    const instructionChain = await this.markInstructionsDelivered(
-      workspace,
-      input.initialScope ?? workspace.root,
-    );
+    return this.createContext(workspace, input.initialScope ?? workspace.root);
+  }
+
+  private async createContext(
+    workspace: Workspace,
+    initialScope: string,
+  ): Promise<WorkspaceContext> {
+    const instructionChain = await this.markInstructionsDelivered(workspace, initialScope);
     const agentsFiles = instructionChain.sources.map((source) => ({
       path: source.path,
       content: source.content,
@@ -294,6 +346,78 @@ export class WorkspaceRegistry {
     const availableAgentsFiles: AvailableAgentsFile[] = [];
 
     return { workspace, agentsFiles, availableAgentsFiles, instructionChain };
+  }
+
+  private async openCanonicalCheckoutWorkspace(root: string): Promise<Workspace> {
+    const pending = this.checkoutOpenPromises.get(root);
+    if (pending) return pending;
+
+    const opening = (async () => {
+      const existing = this.checkoutWorkspacesByRoot.get(root);
+      if (existing) {
+        await this.refreshWorkspaceMetadata(existing);
+        this.store?.touchSession(existing.id);
+        return existing;
+      }
+
+      const id = `ws_${randomUUID()}`;
+      await this.reconcileStoredCheckoutSessions(root);
+      const session = this.store?.getOrCreateCheckoutSession({ id, root });
+      const persisted = session ? this.workspaces.get(session.id) : undefined;
+      if (persisted) {
+        await this.refreshWorkspaceMetadata(persisted);
+        this.checkoutWorkspacesByRoot.set(root, persisted);
+        return persisted;
+      }
+
+      const loadedSkills = this.loadSkillsForWorkspace(root);
+      const workspace: Workspace = {
+        id: session?.id ?? id,
+        root,
+        mode: "checkout",
+        ...loadedSkills,
+        skillResources: createSkillResourceCatalog(loadedSkills.skills),
+        agentProfiles: await loadLocalAgentProfiles(this.config, root),
+        activatedSkillIds: new Set(),
+        deliveredInstructionHashes: new Map(),
+      };
+      this.workspaces.set(workspace.id, workspace);
+      this.checkoutWorkspacesByRoot.set(root, workspace);
+      return workspace;
+    })();
+
+    this.checkoutOpenPromises.set(root, opening);
+    try {
+      return await opening;
+    } finally {
+      if (this.checkoutOpenPromises.get(root) === opening) {
+        this.checkoutOpenPromises.delete(root);
+      }
+    }
+  }
+
+  private async reconcileStoredCheckoutSessions(root: string): Promise<void> {
+    if (!this.store || this.reconciledCheckoutRoots.has(root)) return;
+
+    const matchingIds: string[] = [];
+    for (const session of this.store.listActiveCheckoutSessions()) {
+      try {
+        if (await realpath(session.root) === root) matchingIds.push(session.id);
+      } catch (error) {
+        if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
+      }
+    }
+    this.store.reconcileCheckoutSessions(root, matchingIds);
+    this.reconciledCheckoutRoots.add(root);
+  }
+
+  private async refreshWorkspaceMetadata(workspace: Workspace): Promise<void> {
+    const loadedSkills = this.loadSkillsForWorkspace(workspace.root);
+    const agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
+    workspace.skills = loadedSkills.skills;
+    workspace.skillResources = createSkillResourceCatalog(loadedSkills.skills);
+    workspace.skillDiagnostics = loadedSkills.skillDiagnostics;
+    workspace.agentProfiles = agentProfiles;
   }
 
   private loadSkillsForWorkspace(root: string): Pick<Workspace, "skills" | "skillDiagnostics"> {
@@ -316,11 +440,38 @@ export class WorkspaceRegistry {
     return assertAllowedPath(root, this.config.allowedRoots);
   }
 
-  private async findProjectRoot(requestedRoot: string): Promise<string> {
+  private async assertStoredWorkspaceRootAllowed(
+    root: string,
+    mode: WorkspaceMode,
+    sourceRoot: string | undefined,
+  ): Promise<string> {
+    if (mode === "worktree") {
+      return this.assertWorkspaceRootAllowed(root, mode, sourceRoot);
+    }
+
+    return assertAllowedPath(await realpath(root), await this.canonicalAllowedRoots());
+  }
+
+  private async canonicalAllowedRoots(): Promise<string[]> {
+    const roots: string[] = [];
+    for (const allowedRoot of this.config.allowedRoots) {
+      try {
+        roots.push(await realpath(resolve(allowedRoot)));
+      } catch (error) {
+        if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
+      }
+    }
+    if (roots.length === 0) {
+      throw new Error("No configured allowed root exists.");
+    }
+    return roots;
+  }
+
+  private async findProjectRoot(requestedRoot: string, allowedRoots: string[]): Promise<string> {
     try {
       const gitRoot = (await git(requestedRoot, ["rev-parse", "--show-toplevel"])).stdout.trim();
       if (!gitRoot) return requestedRoot;
-      const allowedGitRoot = assertAllowedPath(gitRoot, this.config.allowedRoots);
+      const allowedGitRoot = assertAllowedPath(await realpath(gitRoot), allowedRoots);
       if (!isPathInsideRoot(requestedRoot, allowedGitRoot)) return requestedRoot;
       return await realpath(allowedGitRoot);
     } catch {

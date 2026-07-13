@@ -4,7 +4,9 @@ import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import { loadConfig } from "./config.js";
+import { databasePath } from "./db/client.js";
 import { GitWorktreeError } from "./git-worktrees.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { ensureCheckoutWorkspaceRoot, WorkspaceRegistry } from "./workspaces.js";
@@ -53,6 +55,10 @@ try {
   });
   const registry = new WorkspaceRegistry(config);
   const { workspace, agentsFiles, availableAgentsFiles } = await registry.openWorkspace(root);
+  const reopened = await registry.openWorkspace(root);
+
+  assert.equal(reopened.workspace, workspace);
+  assert.equal(reopened.workspace.id, workspace.id);
 
   assert.equal(workspace.mode, "checkout");
   assert.deepEqual(
@@ -143,6 +149,19 @@ try {
     nestedGitWorkspace.instructionChain.sources.map((source) => source.content),
     ["git root instructions\n", "git nested instructions\n"],
   );
+  const gitRootWorkspace = await registry.openWorkspace(gitRoot);
+  assert.equal(gitRootWorkspace.workspace.id, nestedGitWorkspace.workspace.id);
+  assert.deepEqual(
+    gitRootWorkspace.instructionChain.sources.map((source) => source.content),
+    ["git root instructions\n"],
+  );
+  const concurrentGitWorkspaces = await Promise.all(
+    Array.from({ length: 20 }, () => registry.openWorkspace(join(gitRoot, "nested"))),
+  );
+  assert.deepEqual(
+    new Set(concurrentGitWorkspaces.map((context) => context.workspace.id)),
+    new Set([nestedGitWorkspace.workspace.id]),
+  );
 
   const worktreeWorkspace = await registry.openWorkspace({
     path: gitRoot,
@@ -157,6 +176,12 @@ try {
   assert.equal(worktreeWorkspace.workspace.worktree?.managed, true);
   assert.equal((await stat(worktreeWorkspace.workspace.root)).isDirectory(), true);
   assert.match(worktreeWorkspace.agentsFiles.map((file) => file.content).join("\n"), /git root instructions/);
+  const secondWorktreeWorkspace = await registry.openWorkspace({
+    path: gitRoot,
+    mode: "worktree",
+  });
+  assert.notEqual(secondWorktreeWorkspace.workspace.id, worktreeWorkspace.workspace.id);
+  assert.notEqual(secondWorktreeWorkspace.workspace.root, worktreeWorkspace.workspace.root);
 
   const worktreeReadmePath = registry.resolvePath(worktreeWorkspace.workspace, "README.md");
   assert.equal(worktreeReadmePath.startsWith(worktreeWorkspace.workspace.root), true);
@@ -173,18 +198,107 @@ try {
 
   const secondStore = new SqliteWorkspaceStore(stateDir);
   const restoredRegistry = new WorkspaceRegistry(config, secondStore);
-  const restoredWorkspace = restoredRegistry.getWorkspace(persistentWorkspace.workspace.id);
+  const concurrentlyRestored = await Promise.all(
+    Array.from(
+      { length: 20 },
+      () => restoredRegistry.getWorkspace(persistentWorkspace.workspace.id),
+    ),
+  );
+  assert.equal(new Set(concurrentlyRestored).size, 1);
+  const restoredWorkspace = concurrentlyRestored[0];
   assert.equal(restoredWorkspace.root, root);
   assert.equal(restoredWorkspace.mode, "checkout");
+  assert.deepEqual(
+    restoredWorkspace.agentProfiles.map((profile) => profile.name),
+    ["reviewer"],
+  );
+  const persistentlyReopenedWorkspace = await restoredRegistry.openWorkspace(root);
+  assert.equal(persistentlyReopenedWorkspace.workspace.id, persistentWorkspace.workspace.id);
 
-  const restoredWorktree = restoredRegistry.getWorkspace(persistentWorktree.workspace.id);
+  const restoredWorktree = await restoredRegistry.getWorkspace(persistentWorktree.workspace.id);
   assert.equal(restoredWorktree.mode, "worktree");
   assert.equal(restoredWorktree.sourceRoot, gitRoot);
   assert.equal(restoredWorktree.root, persistentWorktree.workspace.root);
   assert.equal(restoredWorktree.worktree?.managed, true);
   secondStore.close();
 
+  const migrationStateDir = join(root, ".migration-state");
+  await mkdir(migrationStateDir);
+  const legacyDatabase = new Database(databasePath(migrationStateDir));
+  legacyDatabase.exec(`
+    create table devspace_schema_migrations (
+      version integer primary key,
+      name text not null,
+      applied_at text not null
+    );
+    insert into devspace_schema_migrations values
+      (1, 'workspace-state', '2026-01-01T00:00:00.000Z'),
+      (2, 'oauth-state', '2026-01-01T00:00:00.000Z'),
+      (3, 'local-agent-sessions', '2026-01-01T00:00:00.000Z');
+    create table workspace_sessions (
+      id text primary key,
+      root text not null,
+      status text not null default 'active',
+      mode text not null default 'checkout',
+      source_root text,
+      base_ref text,
+      base_sha text,
+      managed text not null default 'false',
+      created_at text not null,
+      last_used_at text not null
+    );
+    insert into workspace_sessions values
+      ('ws_older', '${root.replaceAll("'", "''")}', 'active', 'checkout', null, null, null, 'false',
+       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+      ('ws_newer', '${root.replaceAll("'", "''")}', 'active', 'checkout', null, null, null, 'false',
+       '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z');
+  `);
+  legacyDatabase.close();
+  const migratedStore = new SqliteWorkspaceStore(migrationStateDir);
+  assert.equal(migratedStore.getSession("ws_older")?.status, "superseded");
+  assert.equal(migratedStore.getSession("ws_newer")?.status, "active");
+  await assert.rejects(
+    () => new WorkspaceRegistry(config, migratedStore).getWorkspace("ws_older"),
+    /no longer active.*open_workspace/i,
+  );
+  assert.equal(
+    migratedStore.getOrCreateCheckoutSession({ id: "ws_unused", root }).id,
+    "ws_newer",
+  );
+  migratedStore.close();
+
   if (platform() !== "win32") {
+    const plainRoot = join(root, "plain-project");
+    const plainAlias = join(root, "plain-project-alias");
+    await mkdir(plainRoot);
+    await writeFile(join(plainRoot, "AGENTS.md"), "plain instructions\n");
+    await symlink(plainRoot, plainAlias, "dir");
+    const plainWorkspace = await registry.openWorkspace(plainRoot);
+    const plainAliasWorkspace = await registry.openWorkspace(plainAlias);
+    assert.equal(plainAliasWorkspace.workspace.id, plainWorkspace.workspace.id);
+    assert.equal(plainAliasWorkspace.workspace.root, plainRoot);
+
+    const aliasStateDir = join(root, ".alias-state");
+    const aliasStore = new SqliteWorkspaceStore(aliasStateDir);
+    aliasStore.createSession({
+      id: "ws_legacy_alias",
+      root: plainAlias,
+      mode: "checkout",
+    });
+    const persistedAliasWorkspace = await new WorkspaceRegistry(config, aliasStore)
+      .openWorkspace(plainAlias);
+    assert.equal(persistedAliasWorkspace.workspace.id, "ws_legacy_alias");
+    assert.equal(persistedAliasWorkspace.workspace.root, plainRoot);
+    assert.equal(aliasStore.getSession("ws_legacy_alias")?.root, plainRoot);
+    aliasStore.close();
+
+    const escapeAlias = join(root, "outside-alias");
+    await symlink(outsideRoot, escapeAlias, "dir");
+    await assert.rejects(
+      () => registry.openWorkspace(escapeAlias),
+      /outside allowed roots/i,
+    );
+
     const aliasRoot = join(root, "alias-root");
     await symlink(root, aliasRoot, "dir");
     const aliasConfig = loadConfig({
@@ -200,11 +314,23 @@ try {
     });
     assert.equal(aliasWorkspace.workspace.sourceRoot, join(aliasRoot, "git-project"));
 
-    const aliasCheckout = await new WorkspaceRegistry(aliasConfig).openWorkspace(aliasRoot);
+    const allowedAliasStateDir = join(root, ".allowed-alias-state");
+    const allowedAliasStore = new SqliteWorkspaceStore(allowedAliasStateDir);
+    allowedAliasStore.createSession({
+      id: "ws_legacy_allowed_alias",
+      root: aliasRoot,
+      mode: "checkout",
+    });
+    const aliasCheckout = await new WorkspaceRegistry(aliasConfig, allowedAliasStore)
+      .openWorkspace(aliasRoot);
+    assert.equal(aliasCheckout.workspace.id, "ws_legacy_allowed_alias");
+    assert.equal(aliasCheckout.workspace.root, root);
+    assert.equal(allowedAliasStore.getSession("ws_legacy_allowed_alias")?.root, root);
     assert.deepEqual(
       aliasCheckout.agentsFiles.map((file) => file.content),
       ["root instructions\n"],
     );
+    allowedAliasStore.close();
   }
 } finally {
   await rm(root, { recursive: true, force: true });

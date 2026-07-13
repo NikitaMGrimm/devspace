@@ -468,7 +468,7 @@ function workspacePayloadText(card: ToolResultCard): string {
     card.workspaceId ? `Workspace: ${card.workspaceId}` : undefined,
     card.root ? `Root: ${card.root}` : undefined,
     skills.length > 0
-      ? `Skills: ${skills.map((skill) => skill.name ?? skill.path ?? "unnamed").join(", ")}`
+      ? `Skills: ${skills.map((skill) => skill.name ?? skill.resource ?? "unnamed").join(", ")}`
       : "Skills: none",
     availableAgentsFiles.length > 0
       ? `Nested instructions: ${availableAgentsFiles.map((file) => file.path ?? "unknown").join(", ")}`

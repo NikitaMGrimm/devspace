@@ -1,13 +1,16 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { loadConfig } from "./config.js";
 import {
   effectiveSkillPaths,
-  formatPathForPrompt,
+  createSkillResourceCatalog,
   loadWorkspaceSkills,
+  markSkillActivated,
   resolveSkillReadPath,
+  SkillResourceError,
 } from "./skills.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-skills-test-"));
@@ -235,19 +238,138 @@ try {
 
   const projectSkill = loaded.skills.find((skill) => skill.name === "agent-project-skill");
   assert.ok(projectSkill);
-  assert.match(formatPathForPrompt(projectSkill.filePath), /SKILL\.md$/);
+  const resources = createSkillResourceCatalog(loaded.skills);
+  assert.equal(resources.some((resource) => resource.skill.name === "hidden-skill"), false);
+  assert.equal(resources.filter((resource) => resource.skill.name === "duplicate-skill").length, 1);
+  const projectResource = resources.find(
+    (resource) => resource.skill.name === "agent-project-skill",
+  );
+  assert.ok(projectResource);
+  assert.match(projectResource.resource, /^skill:\/\/catalog\/[a-f0-9]{64}\/SKILL\.md$/u);
+  assert.equal(
+    projectResource.id,
+    createHash("sha256")
+      .update(await realpath(projectSkill.filePath))
+      .update("\0")
+      .update(await readFile(projectSkill.filePath))
+      .digest("hex"),
+  );
+  assert.equal(createSkillResourceCatalog(loaded.skills).find(
+    (resource) => resource.skill.name === "agent-project-skill",
+  )?.id, projectResource.id);
 
-  const skillFileRead = resolveSkillReadPath(loaded.skills, new Set(), projectSkill.filePath);
+  const activatedSkillIds = new Set<string>();
+  const skillFileRead = resolveSkillReadPath(
+    resources,
+    activatedSkillIds,
+    projectResource.resource,
+  );
   assert.equal(skillFileRead?.isSkillFile, true);
   assert.equal(skillFileRead?.absolutePath, projectSkill.filePath);
+  assert.equal(skillFileRead?.resourceId, projectResource.id);
+  assert.equal(resolveSkillReadPath(resources, activatedSkillIds, projectSkill.filePath), undefined);
 
   const resourcePath = join(projectSkill.baseDir, "references.md");
   await writeFile(resourcePath, "reference\n");
-  assert.equal(resolveSkillReadPath(loaded.skills, new Set(), resourcePath), undefined);
+  const relativeResource = projectResource.resource.replace("SKILL.md", "references.md");
+  assert.throws(
+    () => resolveSkillReadPath(resources, activatedSkillIds, relativeResource),
+    SkillResourceError,
+  );
+  markSkillActivated(activatedSkillIds, projectResource.id);
+  const resourceRead = resolveSkillReadPath(resources, activatedSkillIds, relativeResource);
+  assert.equal(resourceRead?.isSkillFile, false);
+  assert.equal(resourceRead?.absolutePath, resourcePath);
+
+  for (const invalidResource of [
+    projectResource.resource.replace("SKILL.md", "../outside.txt"),
+    projectResource.resource.replace("SKILL.md", "%2e%2e/outside.txt"),
+    projectResource.resource.replace("SKILL.md", "%2Fetc%2Fpasswd"),
+    projectResource.resource.replace("SKILL.md", "references%5Coutside.md"),
+    `${projectResource.resource}?query=1`,
+    `skill://catalog/${projectResource.id}//references.md`,
+    "skill://catalog/not-an-id/SKILL.md",
+  ]) {
+    assert.throws(
+      () => resolveSkillReadPath(resources, activatedSkillIds, invalidResource),
+      SkillResourceError,
+    );
+  }
+
+  const outsideFile = join(root, "outside-reference.md");
+  const escapingLink = join(projectSkill.baseDir, "escaping-reference.md");
+  await writeFile(outsideFile, "outside\n");
+  await symlink(outsideFile, escapingLink);
+  assert.throws(
+    () => resolveSkillReadPath(
+      resources,
+      activatedSkillIds,
+      projectResource.resource.replace("SKILL.md", "escaping-reference.md"),
+    ),
+    SkillResourceError,
+  );
+
+  const insideTarget = join(projectSkill.baseDir, "inside-reference.md");
+  const insideLink = join(projectSkill.baseDir, "inside-link.md");
+  await writeFile(insideTarget, "inside\n");
+  await symlink(insideTarget, insideLink);
   assert.equal(
-    resolveSkillReadPath(loaded.skills, new Set([projectSkill.baseDir]), resourcePath)
-      ?.isSkillFile,
-    false,
+    resolveSkillReadPath(
+      resources,
+      activatedSkillIds,
+      projectResource.resource.replace("SKILL.md", "inside-link.md"),
+    )?.absolutePath,
+    insideTarget,
+  );
+
+  await writeFile(
+    projectSkill.filePath,
+    [
+      "---",
+      "name: agent-project-skill",
+      "description: Updated agent project skill description.",
+      "---",
+      "",
+      "# Updated Agent Project Skill",
+    ].join("\n"),
+  );
+  assert.throws(
+    () => resolveSkillReadPath(resources, activatedSkillIds, relativeResource),
+    /changed after discovery/u,
+  );
+
+  const refreshedResources = createSkillResourceCatalog(loaded.skills);
+  const refreshedProjectResource = refreshedResources.find(
+    (resource) => resource.skill.name === "agent-project-skill",
+  );
+  assert.ok(refreshedProjectResource);
+  assert.notEqual(refreshedProjectResource.id, projectResource.id);
+  const refreshedRelativeResource = refreshedProjectResource.resource.replace(
+    "SKILL.md",
+    "references.md",
+  );
+  assert.throws(
+    () => resolveSkillReadPath(
+      refreshedResources,
+      activatedSkillIds,
+      refreshedRelativeResource,
+    ),
+    /Read the skill's SKILL\.md resource/u,
+  );
+  const refreshedMainRead = resolveSkillReadPath(
+    refreshedResources,
+    activatedSkillIds,
+    refreshedProjectResource.resource,
+  );
+  assert.equal(refreshedMainRead?.isSkillFile, true);
+  markSkillActivated(activatedSkillIds, refreshedProjectResource.id);
+  assert.equal(
+    resolveSkillReadPath(
+      refreshedResources,
+      activatedSkillIds,
+      refreshedRelativeResource,
+    )?.absolutePath,
+    resourcePath,
   );
 } finally {
   if (originalHome === undefined) delete process.env.HOME;
