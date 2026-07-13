@@ -13,7 +13,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
   registerAppResource,
-  registerAppTool,
+  registerAppTool as registerMcpAppTool,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
@@ -151,6 +151,14 @@ function toolWidgetDescriptorMeta(
     },
   };
 }
+
+const registerDevSpaceTool: typeof registerMcpAppTool = (server, name, config, handler) => {
+  if (config._meta?.ui?.resourceUri) {
+    return registerMcpAppTool(server, name, config, handler);
+  }
+  const { _meta: _unusedMeta, ...plainConfig } = config;
+  return server.registerTool(name, plainConfig, handler);
+};
 
 const toolNames = {
   openWorkspace: "open_workspace",
@@ -676,7 +684,7 @@ function registerCodexProcessTools(
   workspaces: WorkspaceRegistry,
   processSessions: ProcessSessionManager,
 ): void {
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     "exec_command",
     {
@@ -764,7 +772,7 @@ function registerCodexProcessTools(
     },
   );
 
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     "write_stdin",
     {
@@ -961,7 +969,7 @@ function createMcpServer(
     }
   };
 
-  if (config.toolMode === "codex") registerAppTool(
+  if (config.toolMode === "codex") registerDevSpaceTool(
     server,
     "export_file",
     {
@@ -985,13 +993,13 @@ function createMcpServer(
         sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
         expires_at: z.string().optional(),
       },
-      ...toolWidgetDescriptorMeta(config, "read"),
+      _meta: {},
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async ({ workspace_id, path }) => handleExportFile(workspace_id, path, undefined, true),
   );
 
-  if (config.toolMode !== "codex") registerAppTool(
+  if (config.toolMode !== "codex") registerDevSpaceTool(
     server,
     "export_file",
     {
@@ -1016,13 +1024,13 @@ function createMcpServer(
         sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
         expiresAt: z.string().optional(),
       },
-      ...toolWidgetDescriptorMeta(config, "read"),
+      _meta: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ workspaceId, path, downloadName }) => handleExportFile(workspaceId, path, downloadName),
   );
 
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     "open_workspace",
     {
@@ -1237,7 +1245,7 @@ function createMcpServer(
     },
   );
 
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     toolNames.read,
     {
@@ -1379,7 +1387,7 @@ function createMcpServer(
   );
 
   if (config.toolMode !== "codex") {
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     toolNames.write,
     {
@@ -1462,7 +1470,7 @@ function createMcpServer(
     },
   );
 
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     toolNames.edit,
     {
@@ -1577,7 +1585,7 @@ function createMcpServer(
         path: z.string().min(1).describe("Workspace-relative path for an existing file to delete."),
       }).strict(),
     ]);
-    registerAppTool(
+    registerDevSpaceTool(
       server,
       "apply_patch",
       {
@@ -1603,7 +1611,7 @@ function createMcpServer(
           fuzz: z.number().int().nonnegative().optional(),
           error: z.string().optional(),
         },
-        ...toolWidgetDescriptorMeta(config, "edit"),
+        _meta: {},
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
       async ({ workspace_id, operation }) => {
@@ -1658,7 +1666,7 @@ function createMcpServer(
   }
 
   if (config.toolMode === "full") {
-    registerAppTool(
+    registerDevSpaceTool(
       server,
       toolNames.grep,
       {
@@ -1731,7 +1739,7 @@ function createMcpServer(
       },
     );
 
-    registerAppTool(
+    registerDevSpaceTool(
       server,
       toolNames.glob,
       {
@@ -1801,7 +1809,7 @@ function createMcpServer(
       },
     );
 
-    registerAppTool(
+    registerDevSpaceTool(
       server,
       toolNames.ls,
       {
@@ -1869,7 +1877,7 @@ function createMcpServer(
   }
 
   if (config.toolMode !== "codex") {
-  registerAppTool(
+  registerDevSpaceTool(
     server,
     toolNames.shell,
     {
