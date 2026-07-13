@@ -62,6 +62,18 @@ try {
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
     "apply_patch", "exec_command", "export_file", "open_workspace", "read", "write_stdin",
   ]);
+  assert.deepEqual(
+    listed.tools
+      .filter((tool) => tool._meta?.ui !== undefined)
+      .map((tool) => tool.name),
+    ["open_workspace"],
+    "changes mode should advertise UI only for tools that return a workspace card",
+  );
+  for (const name of ["apply_patch", "export_file", "exec_command", "read", "write_stdin"]) {
+    const tool = listed.tools.find((candidate) => candidate.name === name);
+    assert.ok(tool);
+    assert.equal(tool._meta, undefined, `${name} should omit disabled UI metadata`);
+  }
   for (const tool of listed.tools) assert.ok(tool.outputSchema, `${tool.name} needs outputSchema`);
   const patchTool = listed.tools.find((tool) => tool.name === "apply_patch");
   assert.ok(patchTool);
@@ -256,6 +268,44 @@ try {
 } finally {
   await client.close();
   await running.close();
+}
+
+for (const [widgetMode, expectedUiTools] of [
+  ["full", ["exec_command", "open_workspace", "read", "write_stdin"]],
+  ["off", []],
+] as const) {
+  const widgetServer = createMcpServerForTesting(loadConfig({
+    DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_ALLOWED_ROOTS: root,
+    DEVSPACE_ALLOWED_HOSTS: "*",
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    DEVSPACE_PUBLIC_BASE_URL: "https://devspace.example.com",
+    DEVSPACE_STATE_DIR: stateDir,
+    DEVSPACE_TOOL_MODE: "codex",
+    DEVSPACE_WIDGETS: widgetMode,
+    DEVSPACE_LOG_LEVEL: "silent",
+  }));
+  const [widgetClientTransport, widgetServerTransport] = InMemoryTransport.createLinkedPair();
+  const widgetClient = new Client({ name: `devspace-${widgetMode}-widget-test`, version: "1" });
+  await widgetServer.server.connect(widgetServerTransport);
+  await widgetClient.connect(widgetClientTransport);
+  try {
+    const tools = await widgetClient.listTools();
+    const expectedUiToolNames = new Set<string>(expectedUiTools);
+    assert.deepEqual(
+      tools.tools
+        .filter((tool) => tool._meta?.ui !== undefined)
+        .map((tool) => tool.name)
+        .sort(),
+      [...expectedUiTools].sort(),
+    );
+    for (const tool of tools.tools.filter((candidate) => !expectedUiToolNames.has(candidate.name))) {
+      assert.equal(tool._meta, undefined, `${tool.name} should omit disabled UI metadata`);
+    }
+  } finally {
+    await widgetClient.close();
+    await widgetServer.close();
+  }
 }
 
 for (const mode of ["minimal", "full"] as const) {
