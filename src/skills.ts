@@ -1,6 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   loadSkills,
@@ -19,10 +20,28 @@ export interface SkillReadResolution {
   absolutePath: string;
   skill: Skill;
   isSkillFile: boolean;
+  resourceId: string;
+}
+
+export interface SkillResource {
+  id: string;
+  resource: string;
+  skill: Skill;
+  canonicalBaseDir: string;
+  canonicalSkillFile: string;
+}
+
+export class SkillResourceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SkillResourceError";
+  }
 }
 
 const SUBAGENT_DELEGATION_NAME = "subagent-delegation";
 const SUBAGENT_DELEGATION_SKILL = join(SUBAGENT_DELEGATION_NAME, "SKILL.md");
+const SKILL_RESOURCE_PREFIX = "skill://catalog/";
+const SKILL_RESOURCE_PATTERN = /^skill:\/\/catalog\/([a-f0-9]{64})\/(.+)$/u;
 
 function bundledSkillsDir(): string {
   return fileURLToPath(new URL("../skills", import.meta.url));
@@ -82,46 +101,152 @@ export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSk
   };
 }
 
-export function resolveSkillReadPath(
-  skills: Skill[],
-  activatedSkillDirs: Set<string>,
-  inputPath: string,
-): SkillReadResolution | undefined {
-  const absolutePath = resolve(expandHomePath(inputPath));
+export function createSkillResourceCatalog(skills: Skill[]): SkillResource[] {
+  const resources: SkillResource[] = [];
+  const seenNames = new Set<string>();
 
   for (const skill of skills) {
-    const skillFilePath = resolve(skill.filePath);
-    if (absolutePath === skillFilePath) {
-      return { absolutePath, skill, isSkillFile: true };
+    if (seenNames.has(skill.name)) continue;
+    seenNames.add(skill.name);
+    if (skill.disableModelInvocation) continue;
+
+    try {
+      const canonicalBaseDir = realpathSync(skill.baseDir);
+      const canonicalSkillFile = realpathSync(skill.filePath);
+      if (!statSync(canonicalSkillFile).isFile()) continue;
+      if (!isPathInsideRoot(canonicalSkillFile, canonicalBaseDir)) continue;
+
+      const id = createSkillResourceId(canonicalSkillFile);
+      resources.push({
+        id,
+        resource: `${SKILL_RESOURCE_PREFIX}${id}/SKILL.md`,
+        skill,
+        canonicalBaseDir,
+        canonicalSkillFile,
+      });
+    } catch {
+      // Discovery is best-effort. A skill removed or made unreadable while the
+      // catalog is built is simply unavailable to the model.
     }
   }
 
-  for (const skill of skills) {
-    const baseDir = resolve(skill.baseDir);
-    if (!activatedSkillDirs.has(baseDir)) continue;
-    if (!isPathInsideRoot(absolutePath, baseDir)) continue;
+  return resources;
+}
 
-    return { absolutePath, skill, isSkillFile: false };
+export function isSkillResource(input: string): boolean {
+  return input.startsWith("skill:");
+}
+
+export function resolveSkillReadPath(
+  resources: SkillResource[],
+  activatedSkillIds: Set<string>,
+  inputPath: string,
+): SkillReadResolution | undefined {
+  if (!isSkillResource(inputPath)) return undefined;
+  if (inputPath.includes("?") || inputPath.includes("#")) {
+    throw new SkillResourceError("Skill resource URIs cannot contain a query or fragment.");
   }
 
-  return undefined;
+  const match = SKILL_RESOURCE_PATTERN.exec(inputPath);
+  if (!match) throw new SkillResourceError("Invalid skill resource URI.");
+
+  const [, resourceId, encodedPath] = match;
+  const resource = resources.find((candidate) => candidate.id === resourceId);
+  if (!resource) throw new SkillResourceError("Unknown skill resource.");
+
+  const segments = parseResourceSegments(encodedPath);
+  const isSkillFile = segments.length === 1 && segments[0] === "SKILL.md";
+  if (!isSkillFile && !activatedSkillIds.has(resource.id)) {
+    throw new SkillResourceError("Read the skill's SKILL.md resource before its relative files.");
+  }
+
+  let currentBaseDir: string;
+  try {
+    currentBaseDir = realpathSync(resource.skill.baseDir);
+  } catch {
+    throw new SkillResourceError("Skill resource is no longer available.");
+  }
+  if (currentBaseDir !== resource.canonicalBaseDir) {
+    throw new SkillResourceError("Skill resource changed after discovery.");
+  }
+  try {
+    const currentSkillFile = realpathSync(resource.skill.filePath);
+    if (
+      currentSkillFile !== resource.canonicalSkillFile ||
+      !statSync(currentSkillFile).isFile() ||
+      createSkillResourceId(currentSkillFile) !== resource.id
+    ) {
+      throw new SkillResourceError("Skill resource changed after discovery.");
+    }
+  } catch (error) {
+    if (error instanceof SkillResourceError) throw error;
+    throw new SkillResourceError("Skill resource changed after discovery.");
+  }
+
+  const candidate = resolve(resource.canonicalBaseDir, ...segments);
+  if (!isPathInsideRoot(candidate, resource.canonicalBaseDir)) {
+    throw new SkillResourceError("Skill resource path escapes its skill directory.");
+  }
+
+  let absolutePath: string;
+  try {
+    absolutePath = realpathSync(candidate);
+    if (!statSync(absolutePath).isFile()) {
+      throw new SkillResourceError("Skill resource is not a regular file.");
+    }
+  } catch (error) {
+    if (error instanceof SkillResourceError) throw error;
+    throw new SkillResourceError("Skill resource is not an available regular file.");
+  }
+
+  if (!isPathInsideRoot(absolutePath, resource.canonicalBaseDir)) {
+    throw new SkillResourceError("Skill resource path escapes its skill directory.");
+  }
+  if (isSkillFile && absolutePath !== resource.canonicalSkillFile) {
+    throw new SkillResourceError("Skill resource changed after discovery.");
+  }
+
+  return { absolutePath, skill: resource.skill, isSkillFile, resourceId: resource.id };
 }
 
 export function markSkillActivated(
-  activatedSkillDirs: Set<string>,
-  skill: Skill,
+  activatedSkillIds: Set<string>,
+  resourceId: string,
 ): void {
-  activatedSkillDirs.add(resolve(skill.baseDir));
+  activatedSkillIds.add(resourceId);
 }
 
-export function formatPathForPrompt(path: string): string {
-  const home = resolve(homedir());
-  const resolvedPath = resolve(path);
-
-  if (resolvedPath === home) return "~";
-  if (resolvedPath.startsWith(`${home}${sep}`)) {
-    return `~/${resolvedPath.slice(home.length + 1).split(sep).join("/")}`;
+function parseResourceSegments(encodedPath: string): string[] {
+  const encodedSegments = encodedPath.split("/");
+  if (encodedSegments.some((segment) => segment.length === 0)) {
+    throw new SkillResourceError("Invalid skill resource URI.");
   }
 
-  return resolvedPath.split(sep).join("/");
+  return encodedSegments.map((encodedSegment) => {
+    let segment: string;
+    try {
+      segment = decodeURIComponent(encodedSegment);
+    } catch {
+      throw new SkillResourceError("Invalid skill resource URI encoding.");
+    }
+
+    if (
+      segment === "." ||
+      segment === ".." ||
+      segment.includes("/") ||
+      segment.includes("\\") ||
+      segment.includes("\0")
+    ) {
+      throw new SkillResourceError("Invalid skill resource path segment.");
+    }
+    return segment;
+  });
+}
+
+function createSkillResourceId(canonicalSkillFile: string): string {
+  return createHash("sha256")
+    .update(canonicalSkillFile)
+    .update("\0")
+    .update(readFileSync(canonicalSkillFile))
+    .digest("hex");
 }

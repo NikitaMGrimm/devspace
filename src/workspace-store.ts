@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import {
   workspaceSessions,
@@ -30,6 +30,9 @@ export interface WorkspaceStore {
     baseSha?: string;
     managed?: boolean;
   }): WorkspaceSession;
+  getOrCreateCheckoutSession(input: { id: string; root: string }): WorkspaceSession;
+  listActiveCheckoutSessions(): WorkspaceSession[];
+  reconcileCheckoutSessions(root: string, matchingIds: string[]): WorkspaceSession | undefined;
   getSession(id: string): WorkspaceSession | undefined;
   touchSession(id: string): void;
   close?(): void;
@@ -84,6 +87,77 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
     return session;
   }
 
+  getOrCreateCheckoutSession(input: { id: string; root: string }): WorkspaceSession {
+    const getOrCreate = this.database.sqlite.transaction(() => {
+      const existing = this.database.db
+        .select()
+        .from(workspaceSessions)
+        .where(and(
+          eq(workspaceSessions.root, input.root),
+          eq(workspaceSessions.mode, "checkout"),
+          eq(workspaceSessions.status, "active"),
+        ))
+        .get();
+      if (existing) {
+        this.touchSession(existing.id);
+        return rowToWorkspaceSession(existing);
+      }
+
+      return this.createSession({ id: input.id, root: input.root, mode: "checkout" });
+    });
+
+    return getOrCreate.immediate();
+  }
+
+  listActiveCheckoutSessions(): WorkspaceSession[] {
+    return this.database.db
+      .select()
+      .from(workspaceSessions)
+      .where(and(
+        eq(workspaceSessions.mode, "checkout"),
+        eq(workspaceSessions.status, "active"),
+      ))
+      .all()
+      .map(rowToWorkspaceSession);
+  }
+
+  reconcileCheckoutSessions(root: string, matchingIds: string[]): WorkspaceSession | undefined {
+    const uniqueIds = Array.from(new Set(matchingIds));
+    if (uniqueIds.length === 0) return undefined;
+
+    const reconcile = this.database.sqlite.transaction(() => {
+      const matching = uniqueIds
+        .map((id) => this.getSession(id))
+        .filter((session): session is WorkspaceSession =>
+          session?.mode === "checkout" && session.status === "active"
+        )
+        .sort(compareWorkspaceRecency);
+      if (matching.length === 0) return undefined;
+
+      const canonical = matching.find((session) => session.root === root);
+      const keeper = canonical ?? matching[0];
+      for (const session of matching) {
+        if (session.id === keeper.id) continue;
+        this.database.db
+          .update(workspaceSessions)
+          .set({ status: "superseded" })
+          .where(eq(workspaceSessions.id, session.id))
+          .run();
+      }
+      if (keeper.root !== root) {
+        this.database.db
+          .update(workspaceSessions)
+          .set({ root })
+          .where(eq(workspaceSessions.id, keeper.id))
+          .run();
+      }
+      this.touchSession(keeper.id);
+      return this.getSession(keeper.id);
+    });
+
+    return reconcile.immediate();
+  }
+
   getSession(id: string): WorkspaceSession | undefined {
     const row = this.database.db
       .select()
@@ -125,4 +199,10 @@ function rowToWorkspaceSession(row: WorkspaceSessionRow): WorkspaceSession {
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
   };
+}
+
+function compareWorkspaceRecency(a: WorkspaceSession, b: WorkspaceSession): number {
+  return b.lastUsedAt.localeCompare(a.lastUsedAt)
+    || b.createdAt.localeCompare(a.createdAt)
+    || b.id.localeCompare(a.id);
 }

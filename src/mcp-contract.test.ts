@@ -18,6 +18,7 @@ await writeFile(
   join(externalSkills, "outside-skill", "SKILL.md"),
   "---\nname: outside-skill\ndescription: External skill for contract testing.\n---\n\n# Outside\n",
 );
+await writeFile(join(externalSkills, "outside-skill", "reference.md"), "skill reference\n");
 await writeFile(join(externalSkills, "broken-skill", "SKILL.md"), "not valid skill frontmatter\n");
 await mkdir(join(configDir, "agents"));
 await writeFile(
@@ -100,6 +101,11 @@ try {
   const opened = await client.callTool({ name: "open_workspace", arguments: { path: root } });
   const workspace = opened.structuredContent as Record<string, unknown>;
   const workspaceId = workspace.workspace_id as string;
+  const reopened = await client.callTool({ name: "open_workspace", arguments: { path: root } });
+  assert.equal(
+    (reopened.structuredContent as Record<string, unknown>).workspace_id,
+    workspaceId,
+  );
   assert.equal(workspace.root, root);
   assert.deepEqual(workspace.instruction_sources, ["AGENTS.md"]);
   assert.match(workspace.instructions as string, /root instructions/);
@@ -107,6 +113,8 @@ try {
   const externalSkill = (workspace.skills as Array<Record<string, unknown>>)
     .find((skill) => skill.name === "outside-skill");
   assert.ok(externalSkill);
+  assert.deepEqual(Object.keys(externalSkill).sort(), ["description", "name", "resource"]);
+  assert.match(externalSkill.resource as string, /^skill:\/\/catalog\/[a-f0-9]{64}\/SKILL\.md$/u);
   const reviewer = (workspace.agents as Array<Record<string, unknown>>)
     .find((agent) => agent.name === "reviewer");
   assert.ok(reviewer);
@@ -115,12 +123,24 @@ try {
   assert.equal("agent_providers" in workspace, false);
   assert.ok(Array.isArray(workspace.skill_diagnostics));
   assert.ok((workspace.skill_diagnostics as unknown[]).length > 0);
+  assert.equal(JSON.stringify(workspace.skill_diagnostics).includes(externalSkills), false);
   assert.equal("skillDiagnostics" in workspace, false);
   const skillRead = await client.callTool({
     name: "read",
-    arguments: { workspace_id: workspaceId, path: externalSkill.path, offset: 1, limit: 20 },
+    arguments: { workspace_id: workspaceId, path: externalSkill.resource, offset: 1, limit: 20 },
   });
   assert.match((skillRead.structuredContent as Record<string, unknown>).content as string, /# Outside/);
+  const skillReference = await client.callTool({
+    name: "read",
+    arguments: {
+      workspace_id: workspaceId,
+      path: (externalSkill.resource as string).replace("SKILL.md", "reference.md"),
+    },
+  });
+  assert.match(
+    (skillReference.structuredContent as Record<string, unknown>).content as string,
+    /skill reference/,
+  );
 
   const read = await client.callTool({
     name: "read", arguments: { workspace_id: workspaceId, path: "sample.txt", offset: 1, limit: 1 },

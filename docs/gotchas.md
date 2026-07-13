@@ -132,12 +132,14 @@ npx @waishnav/devspace init --force
 
 ## Unknown `workspaceId`
 
-`workspaceId` values are session identifiers. If the server restarts and the
-client receives an unknown workspace error, call `open_workspace` again for that
-project.
+Checkout workspace IDs are persistent identities for a canonical project root.
+Opening the same checkout again returns the active ID, including after a server
+restart. Managed worktree opens remain unique because each call creates a new
+physical worktree.
 
-Workspace session metadata is persisted, but clients should still treat
-`open_workspace` as the way to begin a fresh working session.
+Running process sessions are in memory and do not survive a server restart. If
+a client receives an unknown workspace error, call `open_workspace` again for
+that project.
 
 ## Workspace Path Rejected
 
@@ -219,7 +221,8 @@ Copy or adapt them into one of the active profile directories before use.
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
 If a skill appears in `open_workspace`, the model must read that skill's
-`SKILL.md` before reading other files inside the skill directory.
+advertised `skill://.../SKILL.md` resource before reading other resources under
+that skill URI. Pass the resource unchanged to `read`; it is not a host path.
 
 ## Review Card Does Not Appear
 
