@@ -105,6 +105,15 @@ advertised `skill://` resource before following that skill. Skill resources are
 opaque references resolved by DevSpace; they do not expose host filesystem
 paths and can be passed unchanged to `read`.
 
+Each advertised skill includes an `origin` of `workspace-local` or `global` so
+clients can distinguish project-owned guidance from user, DevSpace, bundled, or
+explicit external catalogs without exposing host paths.
+
+For Git workspaces, `open_workspace` reports working-tree cleanliness separately
+from upstream synchronization. When a tracking branch exists, the Git summary
+includes the upstream branch, ahead and behind counts, and whether the branch is
+synchronized. A clean working tree can still be ahead of or behind its upstream.
+
 DevSpace only permits reading:
 
 - advertised `skill://.../SKILL.md` resources

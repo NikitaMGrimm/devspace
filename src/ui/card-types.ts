@@ -39,6 +39,7 @@ export interface ToolResultCard {
     name?: string;
     description?: string;
     resource?: string;
+    origin?: "workspace-local" | "global";
   }>;
   skillDiagnostics?: unknown[];
   instruction?: string;

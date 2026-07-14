@@ -12,6 +12,7 @@ const root = await mkdtemp(join(tmpdir(), "devspace-mcp-contract-"));
 const stateDir = await mkdtemp(join(tmpdir(), "devspace-mcp-state-"));
 const configDir = await mkdtemp(join(tmpdir(), "devspace-mcp-config-"));
 const externalSkills = await mkdtemp(join(tmpdir(), "devspace-mcp-skills-"));
+const remote = await mkdtemp(join(tmpdir(), "devspace-mcp-remote-"));
 await mkdir(join(externalSkills, "outside-skill"));
 await mkdir(join(externalSkills, "broken-skill"));
 await writeFile(
@@ -28,6 +29,11 @@ await writeFile(
 await writeFile(join(root, "AGENTS.md"), "root instructions\n");
 await writeFile(join(root, "sample.txt"), "hello\nworld\n");
 await writeFile(join(root, "binary.bin"), Buffer.from([0, 1, 2, 3]));
+await mkdir(join(root, ".agents", "skills", "project-skill"), { recursive: true });
+await writeFile(
+  join(root, ".agents", "skills", "project-skill", "SKILL.md"),
+  "---\nname: project-skill\ndescription: Project skill for contract testing.\n---\n\n# Project\n",
+);
 await mkdir(join(root, "nested"));
 await writeFile(join(root, "nested", "AGENTS.override.md"), "nested instructions\n");
 await mkdir(join(root, "exports"));
@@ -38,6 +44,9 @@ await git(root, ["config", "user.email", "devspace@example.com"]);
 await git(root, ["config", "user.name", "DevSpace Test"]);
 await git(root, ["add", "."]);
 await git(root, ["commit", "-m", "Initial"]);
+await git(remote, ["init", "--bare"]);
+await git(root, ["remote", "add", "origin", remote]);
+await git(root, ["push", "--set-upstream", "origin", "HEAD"]);
 
 const running = createMcpServerForTesting(loadConfig({
   DEVSPACE_CONFIG_DIR: configDir,
@@ -123,12 +132,33 @@ try {
   assert.equal(workspace.root, root);
   assert.deepEqual(workspace.instruction_sources, ["AGENTS.md"]);
   assert.match(workspace.instructions as string, /root instructions/);
-  assert.equal((workspace.git as Record<string, unknown>).is_repository, true);
+  const gitState = workspace.git as Record<string, unknown>;
+  assert.equal(gitState.is_repository, true);
+  assert.equal(gitState.upstream_branch, "origin/main");
+  assert.equal(gitState.ahead, 0);
+  assert.equal(gitState.behind, 0);
+  assert.equal(gitState.synchronized, true);
   const externalSkill = (workspace.skills as Array<Record<string, unknown>>)
     .find((skill) => skill.name === "outside-skill");
   assert.ok(externalSkill);
-  assert.deepEqual(Object.keys(externalSkill).sort(), ["description", "name", "resource"]);
+  assert.deepEqual(Object.keys(externalSkill).sort(), ["description", "name", "origin", "resource"]);
+  assert.equal(externalSkill.origin, "global");
   assert.match(externalSkill.resource as string, /^skill:\/\/catalog\/[a-f0-9]{64}\/SKILL\.md$/u);
+  const projectSkill = (workspace.skills as Array<Record<string, unknown>>)
+    .find((skill) => skill.name === "project-skill");
+  assert.ok(projectSkill);
+  assert.equal(projectSkill.origin, "workspace-local");
+
+  await writeFile(join(root, "ahead.txt"), "ahead\n");
+  await git(root, ["add", "ahead.txt"]);
+  await git(root, ["commit", "-m", "Ahead"]);
+  const aheadOpened = await client.callTool({ name: "open_workspace", arguments: { path: root } });
+  const aheadGit = (aheadOpened.structuredContent as Record<string, unknown>)
+    .git as Record<string, unknown>;
+  assert.equal(aheadGit.dirty, false);
+  assert.equal(aheadGit.ahead, 1);
+  assert.equal(aheadGit.behind, 0);
+  assert.equal(aheadGit.synchronized, false);
   const reviewer = (workspace.agents as Array<Record<string, unknown>>)
     .find((agent) => agent.name === "reviewer");
   assert.ok(reviewer);

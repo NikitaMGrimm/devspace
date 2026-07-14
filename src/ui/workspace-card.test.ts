@@ -20,3 +20,14 @@ assert.equal(
 );
 
 assert.equal(text.includes("none loaded"), false);
+
+assert.match(
+  workspacePayloadText({
+    tool: "open_workspace",
+    skills: [
+      { name: "project-skill", origin: "workspace-local" },
+      { name: "shared-skill", origin: "global" },
+    ],
+  }),
+  /Skills: project-skill \(workspace-local\), shared-skill \(global\)/u,
+);

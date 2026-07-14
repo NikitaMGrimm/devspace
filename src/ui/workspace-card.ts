@@ -11,7 +11,10 @@ export function workspacePayloadText(card: ToolResultCard): string {
       ? `Instructions: ${instructions.join(", ")}`
       : "Instructions: none",
     skills.length > 0
-      ? `Skills: ${skills.map((skill) => skill.name ?? skill.resource ?? "unnamed").join(", ")}`
+      ? `Skills: ${skills.map((skill) => {
+          const name = skill.name ?? skill.resource ?? "unnamed";
+          return skill.origin ? `${name} (${skill.origin})` : name;
+        }).join(", ")}`
       : "Skills: none",
   ]
     .filter((line): line is string => typeof line === "string")

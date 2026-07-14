@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { access, readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
-import { dirname } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -245,6 +245,7 @@ const workspaceSkillOutputSchema = z.object({
   name: z.string(),
   description: z.string(),
   resource: z.string(),
+  origin: z.enum(["workspace-local", "global"]),
 });
 
 function modelSkillDiagnostics(
@@ -476,6 +477,10 @@ async function workspaceGitState(root: string): Promise<{
   detached: boolean;
   headCommit?: string;
   dirty: boolean;
+  upstreamBranch?: string;
+  ahead?: number;
+  behind?: number;
+  synchronized?: boolean;
 }> {
   try {
     const headCommit = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
@@ -486,10 +491,50 @@ async function workspaceGitState(root: string): Promise<{
       branch = undefined;
     }
     const dirty = (await git(root, ["status", "--porcelain", "--untracked-files=normal"])).stdout.length > 0;
-    return { isRepository: true, branch, detached: !branch, headCommit, dirty };
+    let upstreamBranch: string | undefined;
+    let ahead: number | undefined;
+    let behind: number | undefined;
+    try {
+      upstreamBranch = (await git(root, [
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+      ])).stdout.trim() || undefined;
+      const counts = (await git(root, [
+        "rev-list",
+        "--left-right",
+        "--count",
+        "HEAD...@{upstream}",
+      ])).stdout.trim().split(/\s+/u).map(Number);
+      if (counts.length === 2 && counts.every(Number.isSafeInteger)) {
+        [ahead, behind] = counts;
+      }
+    } catch {
+      upstreamBranch = undefined;
+    }
+    return {
+      isRepository: true,
+      branch,
+      detached: !branch,
+      headCommit,
+      dirty,
+      upstreamBranch,
+      ahead,
+      behind,
+      synchronized: ahead !== undefined && behind !== undefined
+        ? ahead === 0 && behind === 0
+        : undefined,
+    };
   } catch {
     return { isRepository: false, detached: false, dirty: false };
   }
+}
+
+function skillOrigin(workspaceRoot: string, filePath: string): "workspace-local" | "global" {
+  const root = resolve(workspaceRoot);
+  const skill = resolve(filePath);
+  return skill === root || skill.startsWith(`${root}${sep}`) ? "workspace-local" : "global";
 }
 
 function countDiffStats(diff: string | undefined): DiffStats {
@@ -1079,6 +1124,10 @@ function createMcpServer(
           detached: z.boolean(),
           head_commit: z.string().optional(),
           dirty: z.boolean(),
+          upstream_branch: z.string().optional(),
+          ahead: z.number().int().nonnegative().optional(),
+          behind: z.number().int().nonnegative().optional(),
+          synchronized: z.boolean().optional(),
         }),
         instruction_sources: z.array(z.string()).optional(),
         instructions: z.string().optional(),
@@ -1108,6 +1157,10 @@ function createMcpServer(
           detached: z.boolean(),
           headCommit: z.string().optional(),
           dirty: z.boolean(),
+          upstreamBranch: z.string().optional(),
+          ahead: z.number().int().nonnegative().optional(),
+          behind: z.number().int().nonnegative().optional(),
+          synchronized: z.boolean().optional(),
         }),
         instructionSources: z.array(z.string()),
         instructions: z.string(),
@@ -1133,6 +1186,7 @@ function createMcpServer(
           name: skill.name,
           description: skill.description,
           resource,
+          origin: skillOrigin(workspace.root, skill.filePath),
         }));
       const visibleSkillDiagnostics = modelSkillDiagnostics(workspace.skillDiagnostics);
       const visibleAgentProviders = config.subagents ? localAgentProviders : [];
@@ -1211,6 +1265,10 @@ function createMcpServer(
               detached: gitState.detached,
               head_commit: gitState.headCommit,
               dirty: gitState.dirty,
+              upstream_branch: gitState.upstreamBranch,
+              ahead: gitState.ahead,
+              behind: gitState.behind,
+              synchronized: gitState.synchronized,
             },
             ...(instructionSources.length > 0 ? { instruction_sources: instructionSources } : {}),
             ...(instructionChain.instructions ? { instructions: instructionChain.instructions } : {}),
