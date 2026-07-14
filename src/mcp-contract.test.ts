@@ -39,12 +39,12 @@ await writeFile(join(root, "nested", "AGENTS.override.md"), "nested instructions
 await mkdir(join(root, "exports"));
 await writeFile(join(root, "exports", "AGENTS.md"), "export instructions\n");
 await writeFile(join(root, "exports", "artifact.txt"), "download me\n");
-await git(root, ["init"]);
+await git(root, ["init", "--initial-branch=main"]);
 await git(root, ["config", "user.email", "devspace@example.com"]);
 await git(root, ["config", "user.name", "DevSpace Test"]);
 await git(root, ["add", "."]);
 await git(root, ["commit", "-m", "Initial"]);
-await git(remote, ["init", "--bare"]);
+await git(remote, ["init", "--bare", "--initial-branch=main"]);
 await git(root, ["remote", "add", "origin", remote]);
 await git(root, ["push", "--set-upstream", "origin", "HEAD"]);
 
