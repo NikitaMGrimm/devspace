@@ -19,6 +19,7 @@ const DEFAULT_EXPORT_MAX_BYTES = 100 * 1024 * 1024;
 const DEFAULT_EXPORT_CLEANUP_INTERVAL_SECONDS = 60;
 const DEFAULT_EXPORT_MAX_ENTRIES = 64;
 const DEFAULT_EXPORT_MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MCP_SESSION_IDLE_TIMEOUT_SECONDS = 24 * 60 * 60;
 
 export interface ExportConfig {
   ttlSeconds: number;
@@ -45,6 +46,7 @@ export interface ServerConfig {
   devspaceAgentsDir: string;
   subagents: boolean;
   agentDir: string;
+  mcpSessionIdleTimeoutMs: number;
   exports: ExportConfig;
   projectInstructions: ProjectInstructionConfig;
   logging: LoggingConfig;
@@ -294,6 +296,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         ? files.config.subagents === true
         : parseBoolean(env.DEVSPACE_SUBAGENTS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    mcpSessionIdleTimeoutMs:
+      parsePositiveInteger(
+        env.DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS,
+        DEFAULT_MCP_SESSION_IDLE_TIMEOUT_SECONDS,
+        "DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS",
+      ) * 1_000,
     exports: parseExportConfig(env),
     projectInstructions: {
       fallbackFileNames: parseInstructionFallbackFileNames(

@@ -38,7 +38,12 @@ import {
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import {
+  McpSessionRegistry,
+  type McpSessionCloseResult,
+} from "./mcp-sessions.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
+import { shutdownHttpServer } from "./server-shutdown.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
@@ -56,6 +61,7 @@ import {
 } from "./local-agent-availability.js";
 
 type Transport = StreamableHTTPServerTransport;
+const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -2069,7 +2075,7 @@ export function createServer(config = loadConfig()): RunningServer {
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const transports = new Map<string, Transport>();
+  const transports = new McpSessionRegistry<Transport>();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
@@ -2089,6 +2095,34 @@ export function createServer(config = loadConfig()): RunningServer {
   const localAgentProviders = config.subagents
     ? getLocalAgentProviderAvailabilitySnapshot()
     : [];
+
+  const logSessionCloseResults = (
+    reason: "idle_timeout" | "server_shutdown",
+    results: McpSessionCloseResult[],
+  ) => {
+    for (const result of results) {
+      if (result.error) {
+        logEvent(config.logging, "warn", "mcp_session_close_failed", {
+          reason,
+          sessionIdPrefix: sessionIdPrefix(result.sessionId),
+          error: result.error instanceof Error ? result.error.message : String(result.error),
+        });
+        continue;
+      }
+
+      logEvent(config.logging, "info", "mcp_session_closed", {
+        reason,
+        sessionIdPrefix: sessionIdPrefix(result.sessionId),
+      });
+    }
+  };
+
+  const sessionCleanupTimer = setInterval(() => {
+    void transports
+      .closeIdle(config.mcpSessionIdleTimeoutMs)
+      .then((results) => logSessionCloseResults("idle_timeout", results));
+  }, MCP_SESSION_CLEANUP_INTERVAL_MS);
+  sessionCleanupTimer.unref();
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", 1);
@@ -2222,7 +2256,7 @@ export function createServer(config = loadConfig()): RunningServer {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
-            if (transport) transports.set(newSessionId, transport);
+            if (transport) transports.register(newSessionId, transport);
             logEvent(config.logging, "info", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
@@ -2233,9 +2267,9 @@ export function createServer(config = loadConfig()): RunningServer {
 
         transport.onclose = () => {
           const closedSessionId = transport?.sessionId;
-          if (closedSessionId) {
-            transports.delete(closedSessionId);
+          if (closedSessionId && transports.remove(closedSessionId)) {
             logEvent(config.logging, "info", "mcp_session_closed", {
+              reason: "transport_close",
               sessionIdPrefix: sessionIdPrefix(closedSessionId),
             });
           }
@@ -2266,18 +2300,22 @@ export function createServer(config = loadConfig()): RunningServer {
     }
   });
 
-  let closed = false;
+  let closePromise: Promise<void> | undefined;
   return {
     app,
     config,
     localAgentProviders,
-    close: async () => {
-      if (closed) return;
-      closed = true;
-      processSessions.shutdown();
-      oauthProvider.close();
-      workspaceStore.close?.();
-      await exportManager.close();
+    close: () => {
+      closePromise ??= (async () => {
+        clearInterval(sessionCleanupTimer);
+        const results = await transports.closeAll();
+        logSessionCloseResults("server_shutdown", results);
+        processSessions.shutdown();
+        oauthProvider.close();
+        workspaceStore.close?.();
+        await exportManager.close();
+      })();
+      return closePromise;
     },
   };
 }
@@ -2307,11 +2345,19 @@ if (await isMainModule()) {
     }
   });
 
-  const shutdown = () => {
-    httpServer.close(() => {
-      void close().finally(() => process.exit(0));
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await shutdownHttpServer(httpServer, close);
+    process.exit(0);
+  };
+  const handleShutdown = () => {
+    void shutdown().catch((error) => {
+      console.error("devspace shutdown failed", error);
+      process.exit(1);
     });
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", handleShutdown);
+  process.once("SIGTERM", handleShutdown);
 }

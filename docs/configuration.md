@@ -38,6 +38,12 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
+| `DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS` | Idle lifetime for MCP transports. Defaults to `86400` (24 hours). |
+
+MCP clients sometimes reconnect without closing their previous transport.
+DevSpace refreshes activity on every request, checks for idle transports every
+five minutes, and closes transports that exceed this timeout. Remaining
+transports are closed during graceful shutdown.
 
 ## OAuth
 

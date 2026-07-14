@@ -26,6 +26,12 @@ assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
 assert.equal(loadConfig(baseEnv).subagents, false);
+assert.equal(loadConfig(baseEnv).mcpSessionIdleTimeoutMs, 86_400_000);
+assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS: "3600" })
+    .mcpSessionIdleTimeoutMs,
+  3_600_000,
+);
 assert.deepEqual(loadConfig(baseEnv).exports, {
   ttlSeconds: 300,
   maxBytes: 104857600,
@@ -52,6 +58,10 @@ assert.throws(
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_INSTRUCTION_MAX_BYTES: "0" }),
   /Invalid DEVSPACE_INSTRUCTION_MAX_BYTES/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS: "0" }),
+  /Invalid DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS/,
 );
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "1" }).skillsEnabled, true);
