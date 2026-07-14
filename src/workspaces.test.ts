@@ -9,7 +9,7 @@ import { loadConfig } from "./config.js";
 import { databasePath } from "./db/client.js";
 import { GitWorktreeError } from "./git-worktrees.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
-import { ensureCheckoutWorkspaceRoot, WorkspaceRegistry } from "./workspaces.js";
+import { WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));
@@ -103,25 +103,46 @@ try {
     );
   }
 
-  const missingWorkspaceRoot = join(root, "missing", "workspace");
-  const missingWorkspace = await registry.openWorkspace(missingWorkspaceRoot);
-  assert.equal(missingWorkspace.workspace.root, missingWorkspaceRoot);
-  assert.equal(missingWorkspace.workspace.mode, "checkout");
-  assert.equal((await stat(missingWorkspaceRoot)).isDirectory(), true);
-
   {
-    let mkdirCalls = 0;
-    const existingStats = await ensureCheckoutWorkspaceRoot(root, {
-      stat: async (path) => {
-        assert.equal(path, root);
-        return await stat(path);
-      },
-      mkdir: async () => {
-        mkdirCalls += 1;
-      },
+    let candidateDiscoveryCalls = 0;
+    const assistedRegistry = new WorkspaceRegistry(config, undefined, async () => {
+      candidateDiscoveryCalls += 1;
+      return [{
+        path: root,
+        gitRepository: false,
+        previouslyOpened: true,
+        lastUsedAt: "2026-01-01T00:00:00.000Z",
+        matchTier: 4,
+        depth: 0,
+      }];
     });
-    assert.equal(existingStats.isDirectory(), true);
-    assert.equal(mkdirCalls, 0);
+    const existingWorkspace = await assistedRegistry.openWorkspace(root);
+    assert.equal(existingWorkspace.workspace.root, root);
+    assert.equal(candidateDiscoveryCalls, 0);
+
+    const missingWorkspaceRoot = join(root, "missing", "workspace");
+    await assert.rejects(
+      () => assistedRegistry.openWorkspace(missingWorkspaceRoot),
+      (error: unknown) => {
+        assert.equal(candidateDiscoveryCalls, 1);
+        assert.match(String(error), /Workspace path does not exist/);
+        assert.match(String(error), new RegExp(root.replaceAll("/", "\\/")));
+        assert.match(String(error), /Retry open_workspace/);
+        return true;
+      },
+    );
+    await assert.rejects(() => stat(missingWorkspaceRoot), { code: "ENOENT" });
+
+    const filePath = join(root, "not-a-workspace.txt");
+    await writeFile(filePath, "not a directory\n");
+    await assert.rejects(
+      () => assistedRegistry.openWorkspace(filePath),
+      /Workspace path is not a directory.*Possible existing workspaces/s,
+    );
+    await assert.rejects(
+      () => assistedRegistry.openWorkspace(outsideRoot),
+      /Workspace path is outside allowed roots.*Possible existing workspaces/s,
+    );
   }
 
   await assert.rejects(

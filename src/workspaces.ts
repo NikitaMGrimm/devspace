@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import type { ServerConfig } from "./config.js";
 import { git } from "./git.js";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
+import {
+  AccessDeniedError,
+  assertAllowedPath,
+  expandHomePath,
+  isPathInsideRoot,
+  resolveAllowedPath,
+} from "./roots.js";
+import {
+  formatWorkspacePathFailure,
+  resolveWorkspaceCandidates,
+  type WorkspaceCandidate,
+  type WorkspaceCandidateResolver,
+} from "./workspace-candidates.js";
 import {
   isProjectInstructionFile,
   resolveProjectInstructions,
@@ -85,12 +96,6 @@ export interface OpenWorkspaceInput {
   baseRef?: string;
 }
 
-type PathStats = Stats;
-type DirectoryOps = {
-  stat: (path: string) => Promise<PathStats>;
-  mkdir: (path: string, options: { recursive: true }) => Promise<unknown>;
-};
-
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
   private readonly checkoutWorkspacesByRoot = new Map<string, Workspace>();
@@ -101,6 +106,7 @@ export class WorkspaceRegistry {
   constructor(
     private readonly config: ServerConfig,
     private readonly store?: WorkspaceStore,
+    private readonly candidateResolver: WorkspaceCandidateResolver = resolveWorkspaceCandidates,
   ) {}
 
   async openWorkspace(input: string | OpenWorkspaceInput): Promise<WorkspaceContext> {
@@ -269,20 +275,38 @@ export class WorkspaceRegistry {
   }
 
   private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {
-    const requestedRoot = assertAllowedPath(path, this.config.allowedRoots);
-    const rootStats = await ensureCheckoutWorkspaceRoot(requestedRoot);
-    if (!rootStats.isDirectory()) {
-      throw new Error(`Workspace root must be a directory: ${path}`);
-    }
+    const requestedPath = resolve(expandHomePath(path));
+    try {
+      const requestedRoot = assertAllowedPath(path, this.config.allowedRoots);
+      const rootStats = await stat(requestedRoot);
+      if (!rootStats.isDirectory()) {
+        throw new CheckoutWorkspacePathError("Workspace path is not a directory");
+      }
 
-    const canonicalAllowedRoots = await this.canonicalAllowedRoots();
-    const canonicalRequestedRoot = assertAllowedPath(
-      await realpath(requestedRoot),
-      canonicalAllowedRoots,
-    );
-    const root = await this.findProjectRoot(canonicalRequestedRoot, canonicalAllowedRoots);
-    const workspace = await this.openCanonicalCheckoutWorkspace(root);
-    return this.createContext(workspace, canonicalRequestedRoot);
+      const canonicalAllowedRoots = await this.canonicalAllowedRoots();
+      const canonicalRequestedRoot = assertAllowedPath(
+        await realpath(requestedRoot),
+        canonicalAllowedRoots,
+      );
+      const root = await this.findProjectRoot(canonicalRequestedRoot, canonicalAllowedRoots);
+      const workspace = await this.openCanonicalCheckoutWorkspace(root);
+      return this.createContext(workspace, canonicalRequestedRoot);
+    } catch (error) {
+      const heading = checkoutPathFailureHeading(error);
+      if (!heading) throw error;
+
+      let candidates: WorkspaceCandidate[] = [];
+      try {
+        candidates = await this.candidateResolver({
+          requestedPath,
+          allowedRoots: this.config.allowedRoots,
+          sessions: this.store?.listActiveCheckoutSessions() ?? [],
+        });
+      } catch {
+        // Candidate assistance must never replace the original path failure.
+      }
+      throw new Error(formatWorkspacePathFailure(heading, requestedPath, candidates));
+    }
   }
 
   private async openWorktreeWorkspace(path: string, baseRef: string | undefined): Promise<WorkspaceContext> {
@@ -480,22 +504,6 @@ export class WorkspaceRegistry {
   }
 }
 
-export async function ensureCheckoutWorkspaceRoot(
-  path: string,
-  ops: DirectoryOps = { stat, mkdir },
-): Promise<PathStats> {
-  try {
-    return await ops.stat(path);
-  } catch (error) {
-    if (!isErrnoException(error) || error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  await ops.mkdir(path, { recursive: true });
-  return await ops.stat(path);
-}
-
 export function formatAgentsPath(path: string, workspaceRoot: string | undefined): string {
   if (!workspaceRoot) return path.split(sep).join("/");
 
@@ -514,4 +522,15 @@ export function formatAgentsPath(path: string, workspaceRoot: string | undefined
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+class CheckoutWorkspacePathError extends Error {}
+
+function checkoutPathFailureHeading(error: unknown): string | undefined {
+  if (error instanceof CheckoutWorkspacePathError) return error.message;
+  if (error instanceof AccessDeniedError) return "Workspace path is outside allowed roots";
+  if (isErrnoException(error) && error.code === "ENOENT") {
+    return "Workspace path does not exist";
+  }
+  return undefined;
 }
