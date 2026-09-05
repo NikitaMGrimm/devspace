@@ -158,6 +158,23 @@ For a normal ChatGPT coding session:
 4. Approve the connection with the Owner password.
 5. Ask ChatGPT to open a project inside one of your allowed roots.
 
+## Opt-in Codex-compatible tool profile
+
+This fork includes an opt-in `strict-codex` profile. Build this checkout, then
+set the profile for the server process:
+
+```bash
+DEVSPACE_TOOL_MODE=strict-codex node dist/cli.js serve
+```
+
+The profile adds Codex-style command results, complete patch documents, and
+local image responses. It does not start another coding agent. The existing
+`minimal`, `full`, and `codex` profiles remain available.
+
+Read [Codex compatibility](docs/codex-compatibility.md) for the tool contract and
+limits. Read [WSL validation](docs/strict-codex-validation.md) for the local test
+results. Refresh your MCP client's tool definitions after a profile change.
+
 ## Platform Support
 
 DevSpace supports Linux, macOS, and Windows environments with a Bash-compatible

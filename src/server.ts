@@ -9,7 +9,8 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest, CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CODEX_SERVER_INSTRUCTIONS, createCodexToolset } from "./codex-tools.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
   registerAppResource,
@@ -199,6 +200,7 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
+  if (config.toolMode === "strict-codex") return CODEX_SERVER_INSTRUCTIONS;
   if (config.toolMode === "codex") {
     return "Call open_workspace once per project or worktree and reuse its workspace_id. Respect the project instructions it returns and any later instructions_required response. When a returned skill matches the task, read its advertised skill:// resource before proceeding; resolve referenced files beneath that resource. Use read for a known text file, exec_command for searches and commands, apply_patch for structured text edits, write_stdin for running sessions, and export_file for downloadable artifacts. Keep command output bounded.";
   }
@@ -926,6 +928,16 @@ function createMcpServer(
       instructions: serverInstructions(config),
     },
   );
+
+  if (config.toolMode === "strict-codex") {
+    const tools = createCodexToolset(workspaces, processSessions, (entry) => logToolCall(config, entry));
+    server.server.registerCapabilities({ tools: {} });
+    server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools.tools }));
+    server.server.setRequestHandler(CallToolRequestSchema, async (request) =>
+      tools.call(request.params.name, request.params.arguments),
+    );
+    return server;
+  }
 
   registerAppResource(
     server,

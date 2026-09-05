@@ -5,7 +5,7 @@ const DEFAULT_EXEC_YIELD_MS = 10_000;
 const DEFAULT_INTERACTIVE_YIELD_MS = 250;
 const DEFAULT_POLL_YIELD_MS = 5_000;
 const MAX_COMMAND_YIELD_MS = 30_000;
-const MAX_POLL_YIELD_MS = 110_000;
+const MAX_POLL_YIELD_MS = 300_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const DEFAULT_BUFFER_CHARACTERS = 1_000_000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 60_000;
@@ -19,6 +19,8 @@ export interface StartCommandInput {
   command: string;
   cwd: string;
   workspaceRoot?: string;
+  captureCombinedOutput?: boolean;
+  closeStdin?: boolean;
   tty?: boolean;
   columns?: number;
   rows?: number;
@@ -39,6 +41,7 @@ export interface WriteStdinInput {
 
 export interface ProcessSnapshot {
   sessionId?: number;
+  output?: string;
   stdout: string;
   stderr: string;
   stdoutTruncated: boolean;
@@ -66,6 +69,7 @@ interface ProcessSession {
   rows: number;
   stdoutBuffer: HeadTailBuffer;
   stderrBuffer: HeadTailBuffer;
+  outputBuffer?: HeadTailBuffer;
   running: boolean;
   timedOut: boolean;
   exitCode?: number;
@@ -322,6 +326,12 @@ export class ProcessSessionManager {
     return snapshot;
   }
 
+  workspaceForSession(sessionId: number): string {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} has already exited or is unknown; start a new command.`);
+    return session.workspaceId;
+  }
+
   terminate(workspaceId: string, sessionId: number): void {
     const session = this.getOwnedSession(workspaceId, sessionId);
     if (session.running) session.process?.kill("SIGTERM");
@@ -364,6 +374,7 @@ export class ProcessSessionManager {
       rows: terminalSize(input.rows, DEFAULT_ROWS),
       stdoutBuffer: new HeadTailBuffer(this.maxBufferCharacters),
       stderrBuffer: new HeadTailBuffer(this.maxBufferCharacters),
+      outputBuffer: input.captureCombinedOutput ? new HeadTailBuffer(this.maxBufferCharacters) : undefined,
       running: true,
       timedOut: false,
       exitPromise,
@@ -387,12 +398,21 @@ export class ProcessSessionManager {
     });
 
     session.process = {
-      write: (data) => child.stdin.write(data),
+      write: (data) => {
+        if (child.stdin.destroyed || child.stdin.writableEnded) {
+          throw new Error("stdin is closed for this session; rerun exec_command with tty=true to keep stdin open");
+        }
+        child.stdin.write(data);
+      },
       kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
       resize: input.tty ? () => undefined : undefined,
     };
-    child.stdout.on("data", (data: Buffer) => this.append(session, "stdout", data.toString("utf8")));
-    child.stderr.on("data", (data: Buffer) => this.append(session, "stderr", data.toString("utf8")));
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (data: string) => this.append(session, "stdout", data));
+    child.stderr.on("data", (data: string) => this.append(session, "stderr", data));
+    child.stdin.on("error", (error) => this.append(session, "stderr", `${error.message}\n`));
+    if (input.closeStdin) child.stdin.end();
     child.on("error", (error) => this.append(session, "stderr", `${error.message}\n`));
     child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
   }
@@ -449,6 +469,7 @@ export class ProcessSessionManager {
 
   private append(session: ProcessSession, stream: "stdout" | "stderr", output: string): void {
     (stream === "stdout" ? session.stdoutBuffer : session.stderrBuffer).append(output);
+    session.outputBuffer?.append(output);
   }
 
   private consume(
@@ -469,10 +490,12 @@ export class ProcessSessionManager {
     const stderrBudget = Math.min(stderrCharacters, Math.max(0, maxCharacters - stdoutBudget));
     const stdout = session.stdoutBuffer.drainWithMetadata(stdoutBudget);
     const stderr = session.stderrBuffer.drainWithMetadata(stderrBudget);
-    const truncated = stdout.truncated || stderr.truncated;
+    const combined = session.outputBuffer?.drainWithMetadata(maxCharacters);
+    const truncated = combined?.truncated ?? (stdout.truncated || stderr.truncated);
 
     return {
       sessionId: session.running ? session.id : undefined,
+      ...(combined ? { output: combined.output } : {}),
       stdout: stdout.output,
       stderr: stderr.output,
       stdoutTruncated: stdout.truncated,

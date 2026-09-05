@@ -1,0 +1,10 @@
+{
+  "repository": "openai/codex",
+  "commit": "c126b0d8ef87fbcde2df7b9c40f24aa91b855758",
+  "files": {
+    "codex-rs/core/src/tools/handlers/shell_spec.rs": "b39408a375077caf0263a18760d10617fa822bb7",
+    "codex-rs/core/src/tools/handlers/apply_patch_spec.rs": "9efd8f9d8da73e9ba3d182627e51840d2d1b85ce",
+    "codex-rs/core/src/tools/handlers/view_image_spec.rs": "f28d9f8b1ab5a2f62be97e04c044699198039e95",
+    "codex-rs/core/assets/tools/apply_patch.lark": "5aa41b0af797a0bde0dc2459c272c9af63e96dc3"
+  }
+}
