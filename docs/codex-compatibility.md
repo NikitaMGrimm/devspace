@@ -10,7 +10,7 @@ the running instance to the new profile.
 
 The ChatGPT model itself calls the tools. No Codex agent, Codex SDK invocation,
 second model, or API key is involved. The profile uses existing workspace and
-process infrastructure and adds no package dependencies.
+process infrastructure. Plugin configuration parsing uses `smol-toml`.
 
 The catalog is available at `tools/list` before `open_workspace`, and remains
 stable when workspaces are opened. The seven tools are:
@@ -38,8 +38,8 @@ No process-wide mutable "selected workspace" is introduced. With exactly one
 open environment, its ID may be omitted. With multiple environments it is
 required, rather than silently directing work to the last-opened project.
 Explicit environment IDs can restore registry-backed workspaces after a
-connection change. Instruction-delivery hashes and activated skills are
-connection-local, not shared by every chat that opens the same checkout.
+connection change. Instruction-delivery hashes and activated skills belong to
+that environment context, not every chat that opens the same checkout.
 The OS files are still shared: use separate worktrees to isolate concurrent edits.
 
 ## Upstream reference and unavoidable differences
@@ -133,7 +133,7 @@ A preflight is workflow guidance, not an OS security boundary.
 
 The existing OAuth, configured roots and worktree infrastructure remain in use.
 Shell execution still has the server account's permissions. This work does not
-add Landlock, a container sandbox, network isolation, global AGENTS discovery,
+add Landlock, a container sandbox, network isolation,
 or new project-root-marker configuration.
 
 ## Verification and maintenance
@@ -184,3 +184,17 @@ A live profile switch still requires a client tool refresh and a new chat.
 
 The strict profile includes `export_file`. It does not expose the legacy change-card UI.
 Use a retained profile when those extensions are required.
+
+## Shared instructions and skills
+
+`open_workspace` returns global guidance before project guidance and lists the source paths in `instruction_sources`.
+It also advertises enabled, unambiguous cached Codex plugin skills.
+`skill_diagnostics` explains imports that DevSpace skipped. See [configuration](configuration.md#codex-plugin-skills) for the supported scope.
+The `read` extension returns `source_path` for skill resources. Use this path to locate their scripts.
+These additions do not change tool names or input schemas.
+
+An `environment_id` identifies an instruction context, not only a checkout.
+Keep the complete opaque value across HTTP reconnects. Independent workspace opens get separate contexts.
+Reconnecting with that value preserves instruction acknowledgements, the current directory, and activated skill resources.
+The server retains at most 256 contexts. A restart or eviction requires fresh instruction delivery.
+Changed instructions still block the requested operation until the next call.

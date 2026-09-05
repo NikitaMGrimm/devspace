@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 
@@ -46,15 +46,27 @@ export async function resolveProjectInstructions(
   projectRoot: string,
   requestedScope: string,
   config: ProjectInstructionConfig,
+  globalDirectory?: string,
 ): Promise<ProjectInstructionChain> {
   const root = await realpath(projectRoot);
   const scope = await realpath(requestedScope);
   assertInside(root, scope);
 
   const sources: ProjectInstructionSource[] = [];
+  if (globalDirectory) {
+    try {
+      const globalRoot = await realpath(globalDirectory);
+      const selected = await selectInstructionFile(
+        globalRoot, globalRoot, { ...config, fallbackFileNames: [] }, true,
+      );
+      if (selected) sources.push(selected);
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
   for (const directory of directoriesFromRoot(root, scope)) {
     const selected = await selectInstructionFile(root, directory, config);
-    if (selected) sources.push(selected);
+    if (selected && !sources.some((source) => source.path === selected.path)) sources.push(selected);
   }
 
   const completeInstructions = sources.map((source) => source.content).join("\n\n");
@@ -103,13 +115,19 @@ async function selectInstructionFile(
   root: string,
   directory: string,
   config: ProjectInstructionConfig,
+  allowContainedSymlink = false,
 ): Promise<ProjectInstructionSource | undefined> {
   for (const fileName of instructionFileNames(config)) {
     const path = join(directory, fileName);
     try {
       const metadata = await lstat(path);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) continue;
+      if (!metadata.isFile() && !(allowContainedSymlink && metadata.isSymbolicLink())) continue;
       const resolvedPath = await realpath(path);
+      // A global symlink may target this configured directory, never an unrelated file.
+      if (metadata.isSymbolicLink()) {
+        try { assertInside(root, resolvedPath); } catch { continue; }
+        if (!(await stat(resolvedPath)).isFile()) continue;
+      }
       assertInside(root, resolvedPath);
       const content = decodeInstruction(await readFile(resolvedPath), resolvedPath);
       if (content.trim().length === 0) continue;

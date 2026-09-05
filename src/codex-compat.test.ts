@@ -337,3 +337,40 @@ test("export_file does not disclose unexpected internal errors", async (t) => {
   assert.equal(result.isError, true);
   assert.deepEqual(result.content, [{ type: "text", text: "Unable to export file." }]);
 });
+
+
+test("environment context survives reconnect without sharing a different client's acknowledgement", async (t) => {
+  const root = await temporary(t), f = fixtures(root);
+  const opened = await createCodexToolset(f.registry, f.processes).call("open_workspace", { path: root });
+  const id = opened.structuredContent!.environment_id as string;
+  const resumed = await createCodexToolset(f.registry, f.processes).call("exec_command", { cmd: "test", environment_id: id });
+  assert.equal(resumed.structuredContent!.output, "start\n");
+  f.instructions.set(root, "Changed guidance");
+  const changed = await createCodexToolset(f.registry, f.processes).call("exec_command", { cmd: "test", environment_id: id });
+  assert.match(String(changed.structuredContent!.output), /NOT executed/);
+  const retried = await createCodexToolset(f.registry, f.processes).call("exec_command", { cmd: "test", environment_id: id });
+  assert.equal(retried.structuredContent!.output, "start\n");
+  const other = await createCodexToolset(f.registry, f.processes).call("open_workspace", { path: root });
+  assert.notEqual(other.structuredContent!.environment_id, id);
+  const nested = join(root, "context-nested"); await mkdir(nested); f.instructions.set(nested, "Nested context guidance");
+  const blocked = await createCodexToolset(f.registry, f.processes).call("exec_command", { cmd: "test", environment_id: id, workdir: nested });
+  assert.match(String(blocked.structuredContent!.output), /NOT executed/);
+  const otherBlocked = await createCodexToolset(f.registry, f.processes).call("exec_command", {
+    cmd: "test", environment_id: other.structuredContent!.environment_id, workdir: nested,
+  });
+  assert.match(String(otherBlocked.structuredContent!.output), /NOT executed/);
+});
+
+
+test("evicted environment contexts require fresh guidance and then resume", async (t) => {
+  const root = await temporary(t), f = fixtures(root);
+  const opened = await createCodexToolset(f.registry, f.processes).call("open_workspace", { path: root });
+  const id = opened.structuredContent!.environment_id;
+  for (let index = 0; index < 256; index++) {
+    await createCodexToolset(f.registry, f.processes).call("open_workspace", { path: root });
+  }
+  const blocked = await createCodexToolset(f.registry, f.processes).call("exec_command", { cmd: "test", environment_id: id });
+  assert.match(String(blocked.structuredContent!.output), /NOT executed/);
+  const retried = await createCodexToolset(f.registry, f.processes).call("exec_command", { cmd: "test", environment_id: id });
+  assert.equal(retried.structuredContent!.output, "start\n");
+});

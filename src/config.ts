@@ -295,7 +295,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       env.DEVSPACE_SUBAGENTS === undefined
         ? files.config.subagents === true
         : parseBoolean(env.DEVSPACE_SUBAGENTS),
-    agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? (env.CODEX_HOME?.trim() || defaultAgentDir()))),
     mcpSessionIdleTimeoutMs:
       parsePositiveInteger(
         env.DEVSPACE_MCP_SESSION_IDLE_TIMEOUT_SECONDS,

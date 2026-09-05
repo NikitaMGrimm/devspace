@@ -240,7 +240,7 @@ export class WorkspaceRegistry {
     scopeDirectory: string = workspace.root,
   ): Promise<ProjectInstructionChain> {
     const scope = assertAllowedPath(scopeDirectory, [workspace.root]);
-    return resolveProjectInstructions(workspace.root, scope, this.config.projectInstructions);
+    return resolveProjectInstructions(workspace.root, scope, this.config.projectInstructions, this.config.agentDir);
   }
 
   async preflightInstructions(

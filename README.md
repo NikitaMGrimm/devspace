@@ -139,7 +139,7 @@ DevSpace gives ChatGPT tools to:
 - create short-lived download links for generated files without putting binary data in tool output
 - use isolated Git worktrees for parallel coding sessions
 - follow root-to-scope project instructions from `AGENTS.override.md`, `AGENTS.md`, and configured fallbacks
-- discover local agent skills from your skill folders
+- load global Codex guidance and discover skills from local folders and enabled cached plugins
 - show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
 
 ## Mental Model

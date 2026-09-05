@@ -115,7 +115,14 @@ Codex-mode `apply_patch` accepts one `create_file`, `update_file`, or
 diff. The previous `*** Begin Patch` wrapper format is intentionally not
 accepted and no legacy patch tool is exposed.
 
-## Project instructions
+## Global and project instructions
+
+DevSpace reads global guidance before project guidance. It selects the first non-empty
+`AGENTS.override.md` or `AGENTS.md` in the configured agent directory.
+The directory priority is `DEVSPACE_AGENT_DIR`, the saved `agentDir`, `CODEX_HOME`, then `~/.codex`.
+Global symlinks must stay inside that directory. This does not expand workspace file access.
+The merged byte limit below covers both global and project guidance.
+
 
 DevSpace selects project instructions from the Git/project root through the
 requested scope. Each directory contributes at most one non-empty file, in this
@@ -145,7 +152,7 @@ call after reading that result.
 | --- | --- |
 | `DEVSPACE_SKILLS` | Set to `0` to hide skills. Enabled by default. |
 | `DEVSPACE_SUBAGENTS` | Set to `1` to expose configured agent profiles as Subagents. Experimental and disabled by default. |
-| `DEVSPACE_AGENT_DIR` | Defaults to `~/.codex`; its `skills` child is loaded for compatibility. |
+| `DEVSPACE_AGENT_DIR` | Overrides the agent directory for global instructions, skills, and cached plugin metadata. Defaults to `CODEX_HOME` or `~/.codex`. |
 | `DEVSPACE_SKILL_PATHS` | Optional comma-separated additional skill directories. |
 
 DevSpace discovers standard Agent Skills from:
@@ -220,3 +227,22 @@ npx @waishnav/devspace serve
 
 The environment assignments must be part of the same command invocation, or
 exported first.
+
+## Codex plugin skills
+
+DevSpace reads enabled plugin entries from the agent directory's `config.toml`.
+It imports skill directories from installed `plugins/cache/<marketplace>/<plugin>/<version>` bundles.
+It does not download plugins or execute their installation hooks.
+The existing `DEVSPACE_SKILLS=0` switch also disables these imports.
+
+DevSpace skips disabled plugins, invalid manifests, path escapes, symlinked skill trees, and ambiguous cached versions.
+It reports skipped imports through skill diagnostics. For multiple cached versions, select the intended skill directory with `DEVSPACE_SKILL_PATHS`.
+Do not remove another application's cache automatically.
+
+This imports instructions and skills, not a Codex session.
+MCP servers, apps, hooks, credentials, approval settings, and other Codex configuration stay separate.
+A skill that calls an external API still needs its runtime and credentials in the DevSpace service environment.
+
+For containers, provide a read-only context directory with global instructions, plugin enablement metadata, and installed skill bundles.
+Set `DEVSPACE_AGENT_DIR` to its container path. Exclude authentication files, session databases, and unrelated secrets.
+Do not assume that the container can read the host user's Codex home.

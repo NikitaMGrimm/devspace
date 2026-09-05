@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:os";
 import { open, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Workspace, WorkspaceRegistry } from "./workspaces.js";
+import { formatAgentsPath, type Workspace, type WorkspaceRegistry } from "./workspaces.js";
 import type { ProcessSessionManager, ProcessSnapshot } from "./process-sessions.js";
 import { ExportFileError, type DevSpaceExportManager } from "./export-manager.js";
 import { applyCodexPatch, containedPatchPath, parseCodexPatch } from "./codex-patch.js";
@@ -162,6 +163,11 @@ function imageMime(data: Buffer): string {
 }
 
 interface Environment { workspace: Workspace; cwd: string }
+// An opaque environment handle carries context across HTTP reconnects. Separate
+// opens get separate handles, even when they share the same canonical checkout.
+// Bound retained contexts without adding a persistence layer or cleanup timer.
+const environmentContexts = new WeakMap<WorkspaceRegistry, Map<string, Environment>>();
+const MAX_ENVIRONMENT_CONTEXTS = 256;
 export interface CodexCallLog { tool: string; success: boolean; durationMs: number; error?: string; command?: string; workspaceId?: string }
 
 /** One immutable tool catalog per MCP connection; no mutable process-wide selected workspace. */
@@ -173,6 +179,18 @@ export function createCodexToolset(
 ): { tools: Tool[]; call(name: string, args?: Arguments): Promise<CallToolResult> } {
   const tools = codexToolDefinitions();
   const environments = new Map<string, Environment>();
+  let retained = environmentContexts.get(workspaces);
+  if (!retained) {
+    retained = new Map();
+    environmentContexts.set(workspaces, retained);
+  }
+  const contexts = retained;
+  function remember(id: string, entry: Environment): void {
+    contexts.delete(id);
+    contexts.set(id, entry);
+    while (contexts.size > MAX_ENVIRONMENT_CONTEXTS) contexts.delete(contexts.keys().next().value!);
+    environments.set(id, entry);
+  }
   function isolatedWorkspace(workspace: Workspace): Workspace {
     return { ...workspace, deliveredInstructionHashes: new Map(), activatedSkillIds: new Set() };
   }
@@ -181,10 +199,23 @@ export function createCodexToolset(
       if (environments.size !== 1) throw new Error("Call open_workspace first, then specify environment_id when more than one project is open.");
       id = environments.keys().next().value!;
     }
-    // Explicit IDs can be restored after reconnect, using the existing registry's allowlist checks.
-    const current = await workspaces.getWorkspace(id);
-    let entry = environments.get(id);
-    if (!entry) { entry = { workspace: isolatedWorkspace(current), cwd: current.root }; environments.set(id, entry); }
+    let entry = environments.get(id) ?? contexts.get(id);
+    // Accept legacy workspace IDs within an already-open connection.
+    if (!entry) {
+      const legacy = [...environments.entries()].find(([, candidate]) => candidate.workspace.id === id);
+      if (legacy) { id = legacy[0]; entry = legacy[1]; }
+    }
+    if (entry) {
+      await workspaces.getWorkspace(entry.workspace.id);
+    } else {
+      // After a restart or cache eviction, restore the checkout but require fresh
+      // instruction delivery. The next reconnect can resume that acknowledgement.
+      const match = /^(ws_[^.]+)(?:\.([0-9a-f-]{36}))?$/u.exec(id);
+      if (!match) throw new Error("Unknown environment ID.");
+      const current = await workspaces.getWorkspace(match[1]);
+      entry = { workspace: isolatedWorkspace(current), cwd: current.root };
+    }
+    remember(id, entry);
     return entry;
   }
   async function preflight(entry: Environment, directories: string[], processTool = false): Promise<CallToolResult | undefined> {
@@ -203,17 +234,23 @@ export function createCodexToolset(
     validate(tool, args);
     if (name === "open_workspace") {
       const context = await workspaces.openWorkspace({ path: args.path as string, mode: args.mode as "checkout" | "worktree" | undefined, baseRef: args.base_ref as string | undefined });
-      const entry: Environment = environments.get(context.workspace.id) ?? { workspace: isolatedWorkspace(context.workspace), cwd: context.instructionChain.scope };
+      const existing = [...environments.entries()].find(([, value]) => value.workspace.id === context.workspace.id);
+      const environmentId = existing?.[0] ?? `${context.workspace.id}.${randomUUID()}`;
+      const entry: Environment = existing?.[1] ?? { workspace: isolatedWorkspace(context.workspace), cwd: context.instructionChain.scope };
       entry.cwd = context.instructionChain.scope;
-      // Preserve per-connection instruction/skill state, refreshing the advertised catalog.
+      // Preserve per-environment instruction/skill state, refreshing the advertised catalog.
       entry.workspace.skillResources = context.workspace.skillResources;
       entry.workspace.skills = context.workspace.skills;
-      environments.set(entry.workspace.id, entry);
+      entry.workspace.skillDiagnostics = context.workspace.skillDiagnostics;
+      remember(environmentId, entry);
       const chain = await workspaces.markInstructionsDelivered(entry.workspace, entry.cwd);
       return objectResult({
-        environment_id: entry.workspace.id, cwd: entry.cwd, mode: entry.workspace.mode,
+        environment_id: environmentId, cwd: entry.cwd, mode: entry.workspace.mode,
         ...(entry.workspace.worktree ? { worktree: entry.workspace.worktree } : {}),
         instructions: chain.instructions, instructions_truncated: chain.truncated,
+        instruction_sources: chain.sources.map((source) => formatAgentsPath(source.path, entry.workspace.root)),
+        ...(entry.workspace.skillDiagnostics.length ? { skill_diagnostics: entry.workspace.skillDiagnostics } : {}),
+        context_note: "Codex instructions and skills are imported; MCP servers, apps, hooks, settings and credentials are not inherited.",
         skills: entry.workspace.skillResources.map(({ skill, resource }) => ({ name: skill.name, description: skill.description, resource })),
       });
     }
@@ -324,7 +361,7 @@ export function createCodexToolset(
     const selected = lines.slice(first - 1, first - 1 + count).join("\n");
     const content = selected.slice(0, 40_000);
     workspaces.markReadPathLoaded(entry.workspace, readPath);
-    return objectResult({ path: args.path, start_line: first, total_lines: lines.length, content, truncated: selected.length > content.length || first - 1 + count < lines.length });
+    return objectResult({ path: args.path, ...(readPath.skillRead ? { source_path: readPath.absolutePath } : {}), start_line: first, total_lines: lines.length, content, truncated: selected.length > content.length || first - 1 + count < lines.length });
   }
   return { tools, async call(name, args = {}) {
     const start = performance.now();

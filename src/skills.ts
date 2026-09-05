@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
+import { discoverCodexPluginSkills } from "./codex-plugin-skills.js";
 
 export interface LoadedSkills {
   skills: Skill[];
@@ -51,7 +52,11 @@ function hasSubagentDelegationSkill(skillDir: string): boolean {
   return existsSync(join(skillDir, SUBAGENT_DELEGATION_SKILL));
 }
 
-export function effectiveSkillPaths(config: ServerConfig, cwd: string): string[] {
+export function effectiveSkillPaths(
+  config: ServerConfig,
+  cwd: string,
+  pluginPaths = discoverCodexPluginSkills(config.agentDir).paths,
+): string[] {
   const bundledSkills = bundledSkillsDir();
   const defaultPathCandidates = [
     join(homedir(), ".agents", "skills"),
@@ -67,7 +72,7 @@ export function effectiveSkillPaths(config: ServerConfig, cwd: string): string[]
   );
 
   const seen = new Set<string>();
-  return [...defaultPaths, ...config.skillPaths]
+  return [...defaultPaths, ...config.skillPaths, ...pluginPaths]
     .map((path) => resolveSkillPath(path, cwd))
     .filter((path) => {
       if (seen.has(path)) return false;
@@ -83,13 +88,15 @@ function resolveSkillPath(path: string, cwd: string): string {
 export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSkills {
   if (!config.skillsEnabled) return { skills: [], diagnostics: [] };
 
+  const plugins = discoverCodexPluginSkills(config.agentDir);
   const result = loadSkills({
     cwd,
     agentDir: config.agentDir,
-    skillPaths: effectiveSkillPaths(config, cwd),
+    skillPaths: effectiveSkillPaths(config, cwd, plugins.paths),
     includeDefaults: false,
   });
 
+  result.diagnostics.push(...plugins.diagnostics);
   if (config.subagents) return result;
 
   return {

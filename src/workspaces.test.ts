@@ -63,7 +63,7 @@ try {
   assert.equal(workspace.mode, "checkout");
   assert.deepEqual(
     agentsFiles.map((file) => file.content),
-    ["root instructions\n"],
+    ["global instructions\n", "root instructions\n"],
   );
   assert.deepEqual(availableAgentsFiles, []);
   assert.deepEqual(
@@ -168,13 +168,13 @@ try {
   assert.equal(nestedGitWorkspace.workspace.root, gitRoot);
   assert.deepEqual(
     nestedGitWorkspace.instructionChain.sources.map((source) => source.content),
-    ["git root instructions\n", "git nested instructions\n"],
+    ["global instructions\n", "git root instructions\n", "git nested instructions\n"],
   );
   const gitRootWorkspace = await registry.openWorkspace(gitRoot);
   assert.equal(gitRootWorkspace.workspace.id, nestedGitWorkspace.workspace.id);
   assert.deepEqual(
     gitRootWorkspace.instructionChain.sources.map((source) => source.content),
-    ["git root instructions\n"],
+    ["global instructions\n", "git root instructions\n"],
   );
   const concurrentGitWorkspaces = await Promise.all(
     Array.from({ length: 20 }, () => registry.openWorkspace(join(gitRoot, "nested"))),
@@ -349,7 +349,7 @@ try {
     assert.equal(allowedAliasStore.getSession("ws_legacy_allowed_alias")?.root, root);
     assert.deepEqual(
       aliasCheckout.agentsFiles.map((file) => file.content),
-      ["root instructions\n"],
+      ["global instructions\n", "root instructions\n"],
     );
     allowedAliasStore.close();
   }

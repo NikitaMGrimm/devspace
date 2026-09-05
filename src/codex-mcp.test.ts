@@ -26,6 +26,18 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     const skillDir = join(project, ".agents", "skills", "http-test");
     await mkdir(skillDir, { recursive: true });
     await mkdir(configDir);
+    const agentDir = join(temporary, "codex-home");
+    await mkdir(agentDir);
+    await writeFile(join(agentDir, "AGENTS.md"), "Global HTTP test instructions.\n");
+    const pluginRoot = join(agentDir, "plugins", "cache", "personal", "video", "1.0.0");
+    const pluginSkill = join(pluginRoot, "skills", "video");
+    await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+    await mkdir(join(pluginSkill, "scripts"), { recursive: true });
+    await writeFile(join(agentDir, "config.toml"), '[plugins."video@personal"]\nenabled = true\n');
+    await writeFile(join(pluginRoot, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "video", skills: "./skills" }));
+    await writeFile(join(pluginSkill, "SKILL.md"), "---\nname: video\ndescription: Imported plugin skill fixture.\n---\nUse the local helper.\n");
+    await writeFile(join(pluginSkill, "reference.md"), "Imported plugin reference.\n");
+    await writeFile(join(pluginSkill, "scripts", "doctor.cjs"), "console.log('PLUGIN_DOCTOR_OK');\n");
     await writeFile(join(project, "AGENTS.md"), "Root HTTP test instructions.\n");
     await writeFile(join(project, "nested", "AGENTS.md"), "Nested HTTP test instructions.\n");
     await writeFile(join(project, "sample.txt"), "original\n");
@@ -46,7 +58,7 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     const ownerToken = randomBytes(32).toString("hex");
     running = createServer(loadConfig({
       HOST: "127.0.0.1", PORT: String(address.port), DEVSPACE_CONFIG_DIR: configDir,
-      DEVSPACE_ALLOWED_ROOTS: project, DEVSPACE_PUBLIC_BASE_URL: baseUrl,
+      DEVSPACE_ALLOWED_ROOTS: project, DEVSPACE_PUBLIC_BASE_URL: baseUrl, DEVSPACE_AGENT_DIR: agentDir,
       DEVSPACE_STATE_DIR: join(temporary, "state"), DEVSPACE_WORKTREE_ROOT: join(temporary, "worktrees"),
       DEVSPACE_OAUTH_OWNER_TOKEN: ownerToken, DEVSPACE_TOOL_MODE: "strict-codex",
       DEVSPACE_WIDGETS: "off", DEVSPACE_LOG_LEVEL: "silent", DEVSPACE_SUBAGENTS: "0",
@@ -117,7 +129,9 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     });
     const opened = (await ok(first, "open_workspace", { path: project })).structuredContent!;
     const environment_id = opened.environment_id as string;
-    assert.equal((await ok(second, "open_workspace", { path: project })).structuredContent!.environment_id, environment_id);
+    assert.notEqual((await ok(second, "open_workspace", { path: project })).structuredContent!.environment_id, environment_id);
+    assert.match(String(opened.instructions), /Global HTTP test instructions[\s\S]*Root HTTP test instructions/);
+    assert.deepEqual(opened.instruction_sources, [join(agentDir, "AGENTS.md"), "AGENTS.md"]);
     await t.test("independent project instructions across clients", async () => {
       for (const client of [first, second]) {
         const preflight = await ok(client, "exec_command", { cmd: "echo EXECUTED_MARKER", workdir: "nested" });
@@ -148,6 +162,20 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
       await ok(first, "read", { path: skill.resource });
       assert.match(String((await ok(first, "read", { path: reference })).structuredContent!.content), /Skill reference/);
       assert.equal((await call(second, "read", { path: reference })).isError, true);
+    });
+    await t.test("cached plugin skills expose helper paths and preserve activation across reconnects", async () => {
+      const skill = (opened.skills as Array<{ name: string; resource: string }>).find(({ name }) => name === "video");
+      assert.ok(skill);
+      const loaded = await ok(first, "read", { path: skill.resource });
+      assert.equal(loaded.structuredContent!.source_path, join(pluginSkill, "SKILL.md"));
+      const reconnected = await connect("plugin-reconnected-client");
+      const reference = skill.resource.replace("SKILL.md", "reference.md");
+      assert.match(String((await ok(reconnected, "read", { environment_id, path: reference })).structuredContent!.content), /Imported plugin reference/);
+      assert.equal((await call(second, "read", { path: reference })).isError, true);
+      const helper = join(pluginSkill, "scripts", "doctor.cjs");
+      const executed = await ok(reconnected, "exec_command", { environment_id, cmd: `node "${helper}"` });
+      assert.equal(executed.structuredContent!.exit_code, 0);
+      assert.match(String(executed.structuredContent!.output), /PLUGIN_DOCTOR_OK/);
     });
     await t.test("export_file returns downloadable immutable bytes and complete metadata", async () => {
       const result = await ok(first, "export_file", { path: "pixel.png" });
@@ -254,8 +282,17 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     });
     await t.test("explicit environment IDs restore state after reconnect", async () => {
       const third = await connect("reconnected-client");
-      assert.match(String((await ok(third, "exec_command", { environment_id, cmd: "echo RESTORED" })).structuredContent!.output), /NOT executed/);
-      assert.match(String((await ok(third, "exec_command", { environment_id, cmd: "echo RESTORED" })).structuredContent!.output), /RESTORED/);
+      const restored = await ok(third, "exec_command", { environment_id, cmd: "echo RESTORED" });
+      assert.equal(restored.structuredContent!.exit_code, 0);
+      assert.match(String(restored.structuredContent!.output), /RESTORED/);
+      await writeFile(join(agentDir, "AGENTS.md"), "Changed global HTTP instructions.\n");
+      const blocked = await ok(third, "exec_command", { environment_id, cmd: "echo AFTER_CHANGE" });
+      assert.match(String(blocked.structuredContent!.output), /NOT executed/);
+      assert.match(String(blocked.structuredContent!.output), /Changed global HTTP instructions/);
+      const fourth = await connect("retry-reconnected-client");
+      const retried = await ok(fourth, "exec_command", { environment_id, cmd: "echo AFTER_CHANGE" });
+      assert.equal(retried.structuredContent!.exit_code, 0);
+      assert.match(String(retried.structuredContent!.output), /AFTER_CHANGE/);
     });
   } finally {
     await Promise.allSettled(clients.map((client) => client.close()));
