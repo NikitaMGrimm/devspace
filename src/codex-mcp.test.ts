@@ -123,7 +123,7 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     const catalog = await first.listTools();
     await t.test("fixed catalog before workspace opening and schema rejection", async () => {
       assert.deepEqual(catalog.tools.map(({ name }) => name).sort(),
-        ["apply_patch", "exec_command", "export_file", "open_workspace", "read", "view_image", "write_stdin"]);
+        ["apply_patch", "exec_command", "export_file", "inspect_files", "open_workspace", "process_status", "read", "view_image", "view_images", "write_stdin"]);
       assert.equal((await call(first, "exec_command", { cmd: "echo bad", workspace_id: "legacy" })).isError, true);
       assert.equal((await call(first, "exec_command", { cmd: "echo no-workspace" })).isError, true);
     });
@@ -132,6 +132,23 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     assert.notEqual((await ok(second, "open_workspace", { path: project })).structuredContent!.environment_id, environment_id);
     assert.match(String(opened.instructions), /Global HTTP test instructions[\s\S]*Root HTTP test instructions/);
     assert.deepEqual(opened.instruction_sources, [join(agentDir, "AGENTS.md"), "AGENTS.md"]);
+    await t.test("request IDs, runtime context and unchanged inherited guidance survive HTTP", async () => {
+      const response = await fetch(`${baseUrl}/healthz`);
+      assert.match(response.headers.get("x-request-id") ?? "", /^[a-f0-9-]{36}$/);
+      const runtime = opened.runtime as Record<string, unknown>;
+      assert.equal(runtime.platform, process.platform);
+      assert.match(String(runtime.server_instance_id), /^[a-f0-9-]{36}$/);
+      assert.equal(Object.hasOwn(runtime, "env"), false);
+      await mkdir(join(project, "plain"));
+      await writeFile(join(project, "plain", "data.txt"), "unchanged chain");
+      const read = await ok(first, "read", { path: "plain/data.txt", environment_id });
+      assert.equal(read.structuredContent?.content, "unchanged chain");
+      const invalid = await call(first, "exec_command", { cmd: "not executed", timeout_ms: 1 });
+      assert.equal(invalid.structuredContent?.execution_state, "not_started");
+      assert.match(String(invalid.structuredContent?.request_id), /^[a-f0-9-]{36}$/);
+      assert.match(String(invalid.structuredContent?.http_request_id), /^[a-f0-9-]{36}$/);
+      assert.ok(invalid.structuredContent?.rpc_request_id !== undefined);
+    });
     await t.test("independent project instructions across clients", async () => {
       for (const client of [first, second]) {
         const preflight = await ok(client, "exec_command", { cmd: "echo EXECUTED_MARKER", workdir: "nested" });
@@ -218,6 +235,57 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
         assert.equal((await call(first, "export_file", { path: "outside-link.txt" })).isError, true);
       }
       assert.equal((await call(first, "export_file", { path: "pixel.png", workspace_id: environment_id })).isError, true);
+    });
+    await t.test("embedded exports and resources/read work without an HTTP download", async () => {
+      await writeFile(join(project, "native.txt"), "native resource evidence");
+      const exported = await ok(first, "export_file", { path: "native.txt", delivery: "embedded" });
+      const embedded = exported.content.find((item) => item.type === "resource");
+      assert.ok(embedded?.type === "resource" && "blob" in embedded.resource);
+      assert.equal(Buffer.from(String(embedded.resource.blob), "base64").toString(), "native resource evidence");
+      const uri = String(exported.structuredContent!.url);
+      await writeFile(join(project, "native.txt"), "changed source");
+      const resource = await first.readResource({ uri });
+      assert.ok(resource.contents[0] && "blob" in resource.contents[0]);
+      assert.equal(Buffer.from(resource.contents[0].blob, "base64").toString(), "native resource evidence");
+      assert.deepEqual((await first.listResources()).resources, []);
+      await assert.rejects(first.readResource({ uri: "file:///etc/passwd" }));
+      const ranged = await fetch(uri, { headers: { Range: "bytes=0-5" } });
+      assert.equal(ranged.status, 206); assert.equal(await ranged.text(), "native");
+      assert.equal(ranged.headers.get("content-range"), "bytes 0-5/24");
+      const suffix = await fetch(uri, { headers: { Range: "bytes=-8" } });
+      assert.equal(suffix.status, 206); assert.equal(await suffix.text(), "evidence");
+      const invalid = await fetch(uri, { headers: { Range: "bytes=99-100" } });
+      assert.equal(invalid.status, 416); assert.equal(invalid.headers.get("content-range"), "bytes */24");
+      const changed = await fetch(uri, { headers: { Range: "bytes=0-5", "If-Range": '"old"' } });
+      assert.equal(changed.status, 200); assert.equal(await changed.text(), "native resource evidence");
+    });
+    await t.test("batch image crop/difference and file hashes work over MCP", async () => {
+      const sharp = (await import("sharp")).default;
+      const bytes = await sharp({ create: { width: 100, height: 80, channels: 3, background: "white" } }).png().toBuffer();
+      await writeFile(join(project, "crop.png"), bytes);
+      const result = await ok(first, "view_images", { images: [
+        { path: "crop.png", crop: { x: 10, y: 5, width: 30, height: 20 }, label: "before" },
+        { path: "crop.png", crop: { x: 10, y: 5, width: 30, height: 20 }, label: "after" },
+      ], difference: true });
+      assert.equal(result.content.filter((item) => item.type === "image").length, 3);
+      assert.equal((result.structuredContent!.difference as Record<string, unknown>).changed_pixels, 0);
+      const inspected = await ok(first, "inspect_files", { paths: [".", "crop.png"], sha256: true });
+      assert.equal((inspected.structuredContent!.files as Array<Record<string, unknown>>)[1]!.sha256, createHash("sha256").update(bytes).digest("hex"));
+    });
+    await t.test("completed command history survives an actual client reconnect", async () => {
+      const executed = await ok(first, "exec_command", { cmd: "printf 'retained-out'; printf 'retained-err' >&2; exit 6" });
+      assert.equal(executed.structuredContent!.exit_code, 6);
+      const id = executed.structuredContent!.process_id;
+      assert.equal(typeof id, "number");
+      const reconnected = await connect("process-reconnected");
+      const status = await ok(reconnected, "process_status", { session_id: id });
+      assert.equal(status.structuredContent!.stdout, "retained-out");
+      assert.equal(status.structuredContent!.stderr, "retained-err");
+      assert.equal(status.structuredContent!.exit_code, 6);
+      const replay = await ok(reconnected, "write_stdin", { session_id: id, max_output_tokens: 1 });
+      assert.equal(replay.structuredContent!.exit_code, 6);
+      assert.equal(replay.structuredContent!.replayed, true);
+      assert.ok(String(replay.structuredContent!.output).length <= 4);
     });
     await t.test("export_file waits for each client's project instructions before publishing a link", async () => {
       await mkdir(join(project, "exports"));

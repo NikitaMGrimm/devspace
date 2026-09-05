@@ -79,6 +79,7 @@ export interface WorkspaceContext {
 export interface WorkspaceInstructionPreflight {
   status: "instructions_required";
   instructionSources: string[];
+  instructionHash: string;
   instructions: string;
   truncated: boolean;
   retryRequired: true;
@@ -248,14 +249,21 @@ export class WorkspaceRegistry {
     scopeDirectory: string = workspace.root,
   ): Promise<WorkspaceInstructionPreflight | undefined> {
     const chain = await this.getInstructionChain(workspace, scopeDirectory);
-    if (workspace.deliveredInstructionHashes.get(chain.scope) === chain.hash) return undefined;
+    const previous = workspace.deliveredInstructionHashes.get(chain.scope);
+    if (previous === chain.hash) return undefined;
+    // A directory is not a new instruction context when it only inherits an
+    // already delivered chain. A known scope changing still needs a notice,
+    // including when its nested instruction file is removed.
+    const inherited = previous === undefined
+      && [...workspace.deliveredInstructionHashes.values()].includes(chain.hash);
 
     workspace.deliveredInstructionHashes.set(chain.scope, chain.hash);
-    if (chain.instructions.length === 0) return undefined;
+    if (inherited || (chain.instructions.length === 0 && previous === undefined)) return undefined;
     return {
       status: "instructions_required",
       instructionSources: chain.sources.map((source) => formatAgentsPath(source.path, workspace.root)),
-      instructions: chain.instructions,
+      instructionHash: chain.hash,
+      instructions: chain.instructions || "The previously delivered instructions for this scope were removed; no project instructions currently apply.",
       truncated: chain.truncated,
       retryRequired: true,
     };

@@ -15,6 +15,8 @@ import {
 } from "node:path";
 import type { Request, Response } from "express";
 import type { ExportConfig } from "./config.js";
+import type { BlobResourceContents } from "@modelcontextprotocol/sdk/types.js";
+import { readSmallFile } from "./file-inspection.js";
 
 const DOWNLOAD_PATH_PREFIX = "/devspace-files/d/";
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
@@ -26,6 +28,7 @@ const MIME_TYPES = new Map([
   [".jpeg", "image/jpeg"],
   [".jpg", "image/jpeg"],
   [".json", "application/json"],
+  [".md", "text/markdown; charset=utf-8"],
   [".pdf", "application/pdf"],
   [".png", "image/png"],
   [".svg", "image/svg+xml"],
@@ -125,7 +128,25 @@ function contentDisposition(name: string): string {
       .replace(/[^\x20-\x7e]/gu, "_")
       .replace(/["\\]/gu, "_")
       .trim() || "download";
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  const encoded = encodeURIComponent(name).replace(/[!'()*]/gu, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+export function byteRange(header: string | undefined, size: number): { start: number; end: number } | undefined {
+  if (header === undefined) return undefined;
+  const match = /^bytes=(\d*)-(\d*)$/u.exec(header.trim());
+  if (!match || (!match[1] && !match[2]) || size === 0) throw new ExportFileError("Unsatisfiable byte range.");
+  let start: number, end: number;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) throw new ExportFileError("Unsatisfiable byte range.");
+    start = Math.max(0, size - suffix); end = size - 1;
+  } else {
+    start = Number(match[1]); end = match[2] ? Number(match[2]) : size - 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) throw new ExportFileError("Unsatisfiable byte range.");
+    end = Math.min(end, size - 1);
+  }
+  return { start, end };
 }
 
 function sameFile(left: Stats, right: Stats): boolean {
@@ -418,6 +439,24 @@ export class DevSpaceExportManager {
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("ETag", `"sha256-${entry.sha256}"`);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    const ifRange = req.header("if-range");
+    let range: ReturnType<typeof byteRange>;
+    try {
+      range = req.method === "HEAD" || (ifRange && ifRange !== `"sha256-${entry.sha256}"`)
+        ? undefined : byteRange(req.header("range"), entry.size);
+    } catch {
+      res.status(416).setHeader("Content-Range", `bytes */${entry.size}`);
+      res.setHeader("Content-Length", "0");
+      res.end();
+      return;
+    }
+    if (range) {
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${entry.size}`);
+      res.setHeader("Content-Length", String(range.end - range.start + 1));
+    }
     res.on("finish", () => {
       this.log("info", "file_export_download", {
         status: res.statusCode,
@@ -433,14 +472,30 @@ export class DevSpaceExportManager {
     }
 
     const stream = createReadStream(entry.snapshotPath, {
-      start: 0,
-      end: entry.size - 1,
+      start: range?.start ?? 0,
+      end: range?.end ?? entry.size - 1,
     });
     stream.on("error", () => {
       if (res.headersSent) res.destroy();
       else res.sendStatus(404);
     });
+    res.on("close", () => stream.destroy());
     stream.pipe(res);
+  }
+
+  /** Read only an already exported immutable snapshot, not an arbitrary URL/path. */
+  async readResource(uri: string): Promise<BlobResourceContents> {
+    const prefix = `${this.publicBaseUrl}${DOWNLOAD_PATH_PREFIX}`;
+    if (!uri.startsWith(prefix)) throw new ExportFileError("Unknown export resource.");
+    const token = uri.slice(prefix.length);
+    const entry = await this.getEntry(token);
+    if (!entry) throw new ExportFileError("Export unavailable or expired; create a new export.");
+    if (entry.size > 4 * 1024 * 1024) throw new ExportFileError("Embedded resource limit is 4 MiB; download larger exports through HTTP.");
+    const bytes = await readSmallFile(entry.snapshotPath, 4 * 1024 * 1024);
+    if (bytes.length !== entry.size || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+      throw new ExportFileError("Export snapshot integrity check failed.");
+    }
+    return { uri, mimeType: entry.mimeType, blob: bytes.toString("base64") };
   }
 
   async cleanupExpired(): Promise<number> {

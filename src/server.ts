@@ -9,7 +9,8 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest, CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest, CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { requestContext } from "./request-context.js";
 import { CODEX_SERVER_INSTRUCTIONS, createCodexToolset } from "./codex-tools.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
@@ -197,6 +198,12 @@ interface ToolLogFields {
   stderrTruncated?: boolean;
   resultCategory?: string;
   exitCode?: number;
+  requestId?: string;
+  httpRequestId?: string;
+  rpcRequestId?: string | number;
+  phase?: "received" | "finished";
+  executionState?: string;
+  failureLayer?: string;
 }
 
 function serverInstructions(config: ServerConfig): string {
@@ -360,7 +367,7 @@ function logToolCall(config: ServerConfig, fields: ToolLogFields): void {
   if (!config.logging.toolCalls) return;
 
   const { command, ...safeFields } = fields;
-  logEvent(config.logging, fields.success ? "info" : "warn", "tool_call", {
+  logEvent(config.logging, fields.success ? "info" : "warn", fields.phase === "received" ? "tool_call_received" : "tool_call", {
     ...safeFields,
     commandPreview: config.logging.shellCommands && command ? commandPreview(command) : undefined,
   });
@@ -931,11 +938,16 @@ function createMcpServer(
 
   if (config.toolMode === "strict-codex") {
     const tools = createCodexToolset(workspaces, processSessions, (entry) => logToolCall(config, entry), exportManager);
-    server.server.registerCapabilities({ tools: {} });
+    server.server.registerCapabilities({ tools: {}, resources: {} });
     server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools.tools }));
-    server.server.setRequestHandler(CallToolRequestSchema, async (request) =>
-      tools.call(request.params.name, request.params.arguments),
+    server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      tools.call(request.params.name, request.params.arguments, extra.requestId),
     );
+    // Links are capabilities, not a browsable listing of another client's exports.
+    server.server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+    server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => ({
+      contents: [await exportManager.readResource(request.params.uri)],
+    }));
     return server;
   }
 
@@ -2144,6 +2156,7 @@ export function createServer(config = loadConfig()): RunningServer {
     const requestId = randomUUID();
     const startedAt = performance.now();
     res.locals.requestId = requestId;
+    res.setHeader("X-Request-ID", requestId);
 
     res.on("finish", () => {
       const path = redactExportRequestPath(requestPath(req));
@@ -2160,7 +2173,7 @@ export function createServer(config = loadConfig()): RunningServer {
       });
     });
 
-    next();
+    requestContext.run({ requestId }, next);
   });
 
   const handleDownload = async (req: Request, res: Response): Promise<void> => {

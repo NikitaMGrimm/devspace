@@ -171,7 +171,7 @@ test("catalog is available before open_workspace and never changes after opening
   const root = await temporary(t), other = await temporary(t);
   const f = fixtures(root), api = createCodexToolset(f.registry, f.processes);
   const original = JSON.stringify(api.tools);
-  assert.deepEqual(api.tools.map((tool) => tool.name), ["open_workspace", "exec_command", "write_stdin", "apply_patch", "view_image", "read", "export_file"]);
+  assert.deepEqual(api.tools.map((tool) => tool.name), ["open_workspace", "exec_command", "write_stdin", "apply_patch", "view_image", "read", "export_file", "view_images", "inspect_files", "process_status"]);
   assert.equal(CODEX_COMPAT_COMMIT.length, 40);
   await api.call("open_workspace", {path:root}); await api.call("open_workspace", {path:other});
   assert.equal(JSON.stringify(api.tools), original);
@@ -238,7 +238,8 @@ test("view_image sends MCP image content, not a textual data-URL result", async 
   await writeFile(join(root,"image.png"),png); await writeFile(join(root,"bad.svg"),"<svg/>");
   await api.call("open_workspace",{path:root});
   const result = await api.call("view_image",{path:"image.png"});
-  assert.deepEqual(result.content,[{type:"image",mimeType:"image/png",data:png.toString("base64")}]);
+  assert.deepEqual(result.content[0],{type:"image",mimeType:"image/png",data:png.toString("base64")});
+  assert.equal((result.structuredContent!.images as Array<Record<string, unknown>>)[0]!.original_width, 1);
   assert.equal((await api.call("view_image",{path:"bad.svg"})).isError,true);
 });
 test("read bounds long-line output and errors are explicit MCP error results", async (t) => {
@@ -267,7 +268,7 @@ test("signal exit codes support pipe names and native PTY numbers", () => {
 
 test("export_file is a separate extension with a workspace-relative path", () => {
   const tool = codexToolDefinitions().find(({ name }) => name === "export_file")!;
-  assert.deepEqual(Object.keys(tool.inputSchema.properties!).sort(), ["environment_id", "path"]);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties!).sort(), ["delivery", "environment_id", "path"]);
   assert.deepEqual(tool.inputSchema.required, ["path"]);
   assert.equal(tool.inputSchema.additionalProperties, false);
   assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
@@ -335,7 +336,8 @@ test("export_file does not disclose unexpected internal errors", async (t) => {
   await api.call("open_workspace", { path: root });
   const result = await api.call("export_file", { path: "artifact.zip" });
   assert.equal(result.isError, true);
-  assert.deepEqual(result.content, [{ type: "text", text: "Unable to export file." }]);
+  assert.equal(result.structuredContent?.error, "Unable to export file.");
+  assert.equal(JSON.stringify(result).includes("private filesystem path or download token"), false);
 });
 
 

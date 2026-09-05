@@ -1,5 +1,10 @@
 # Codex-compatible MCP profile
 
+The reliability update adds optional image crop/display bounds, native embedded
+exports, retained process handles and three DevSpace extensions. See
+[Reliability extensions](mcp-reliability.md) for the current ten-tool contract
+and deliberate departures from the pinned Codex baseline described below.
+
 Enable the opt-in profile with `DEVSPACE_TOOL_MODE=strict-codex`. Existing
 `minimal`, `full`, and `codex` registrations remain unchanged. Test it in a
 separate development instance; changing this source does not deploy it.
@@ -13,7 +18,7 @@ second model, or API key is involved. The profile uses existing workspace and
 process infrastructure. Plugin configuration parsing uses `smol-toml`.
 
 The catalog is available at `tools/list` before `open_workspace`, and remains
-stable when workspaces are opened. The seven tools are:
+stable when workspaces are opened. The ten tools are:
 
 - `open_workspace`: DevSpace bootstrap; returns `environment_id`, `cwd`, project
   instructions, worktree information, and the existing skill catalog.
@@ -26,13 +31,18 @@ stable when workspaces are opened. The seven tools are:
   An optional `environment_id` argument or `*** Environment ID:` header selects
   the project; conflicting IDs fail before any operation.
 - `view_image`: returns actual MCP image content for local PNG, JPEG, GIF, or
-  WebP files, bounded to 8 MiB. It does not advertise unsupported `detail` behavior.
+  WebP files, bounded to 8 MiB, with optional crop/display bounds. It does not
+  advertise unsupported `detail` behavior.
 - `read`: a small DevSpace extension retained for opaque `skill://` references
   and bounded text access. Removing it without replacing skill-resource access
   would break the existing skill workflow. Prefer the shell for normal code inspection.
 - `export_file`: a DevSpace extension for downloadable artifacts. It accepts a
-  workspace-relative `path` and optional `environment_id`. It returns a resource
-  link and metadata, not the file bytes.
+  workspace-relative `path`, optional `environment_id`, and optional `delivery`.
+  It returns a resource link and metadata; `delivery=embedded` also includes a
+  native resource for files up to 4 MiB.
+- `view_images`: bounded batch crops and optional two-image pixel comparison.
+- `inspect_files`: bounded file metadata and optional SHA-256 without shell quoting.
+- `process_status`: non-consuming retained command history and lifecycle status.
 
 No process-wide mutable "selected workspace" is introduced. With exactly one
 open environment, its ID may be omitted. With multiple environments it is
@@ -76,14 +86,16 @@ scheduling, or the Codex agent loop, and is not a measured model-performance cla
 ## Downloadable files
 
 `export_file` uses the existing DevSpace export manager and HTTP download route.
-The six existing tool definitions, including their schemas and descriptions, are unchanged.
-The extension accepts `path` and optional `environment_id`, not legacy `workspace_id`.
+The original required arguments remain; additive options/extensions are documented above.
+The export extension accepts `path`, optional `environment_id` and `delivery`,
+not legacy `workspace_id`.
 With multiple environments open, the caller must provide the environment ID.
 
 The result includes a native MCP `resource_link` and these metadata fields:
 `url`, `filename`, `mime_type`, `size`, `sha256`, and `expires_at`.
 A text block also contains this metadata for clients without structured-result support.
-The tool does not print the source bytes or encode the file as base64.
+Default link delivery does not include source bytes. Embedded delivery uses
+binary MCP resource encoding, never base64 printed as ordinary assistant prose.
 
 Exports use immutable snapshots. Later changes to a source file do not change an existing download.
 The existing expiry, file-size limits, capacity limits, path checks, and token-redacted logs still apply.
@@ -99,6 +111,8 @@ The new profile does not restore the legacy change-card UI.
 
 `exec_command` returns `output`, `wall_time_seconds`, and either `session_id` or
 `exit_code`; `original_token_count` appears when output is truncated. The text
+also includes a retained `process_id`; a repeated final poll sets `replayed=true`.
+The text
 content includes the real result for hosts that do not expose structured content.
 Stdout/stderr are collected into a bounded combined buffer in observed arrival
 order; legacy profiles retain their separate stdout/stderr fields.
