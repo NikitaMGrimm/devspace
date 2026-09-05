@@ -13,7 +13,7 @@ second model, or API key is involved. The profile uses existing workspace and
 process infrastructure and adds no package dependencies.
 
 The catalog is available at `tools/list` before `open_workspace`, and remains
-stable when workspaces are opened. The six tools are:
+stable when workspaces are opened. The seven tools are:
 
 - `open_workspace`: DevSpace bootstrap; returns `environment_id`, `cwd`, project
   instructions, worktree information, and the existing skill catalog.
@@ -30,6 +30,9 @@ stable when workspaces are opened. The six tools are:
 - `read`: a small DevSpace extension retained for opaque `skill://` references
   and bounded text access. Removing it without replacing skill-resource access
   would break the existing skill workflow. Prefer the shell for normal code inspection.
+- `export_file`: a DevSpace extension for downloadable artifacts. It accepts a
+  workspace-relative `path` and optional `environment_id`. It returns a resource
+  link and metadata, not the file bytes.
 
 No process-wide mutable "selected workspace" is introduced. With exactly one
 open environment, its ID may be omitted. With multiple environments it is
@@ -69,6 +72,28 @@ Descriptions, parameter names and successful command-result field names follow
 that reference where the implementation supports the same behavior. This alone
 cannot reproduce ChatGPT's hidden host-side prompting, context management,
 scheduling, or the Codex agent loop, and is not a measured model-performance claim.
+
+## Downloadable files
+
+`export_file` uses the existing DevSpace export manager and HTTP download route.
+The six existing tool definitions, including their schemas and descriptions, are unchanged.
+The extension accepts `path` and optional `environment_id`, not legacy `workspace_id`.
+With multiple environments open, the caller must provide the environment ID.
+
+The result includes a native MCP `resource_link` and these metadata fields:
+`url`, `filename`, `mime_type`, `size`, `sha256`, and `expires_at`.
+A text block also contains this metadata for clients without structured-result support.
+The tool does not print the source bytes or encode the file as base64.
+
+Exports use immutable snapshots. Later changes to a source file do not change an existing download.
+The existing expiry, file-size limits, capacity limits, path checks, and token-redacted logs still apply.
+The tool checks project instructions for each client before it creates a link.
+An instruction response contains `status: "instructions_required"` and `retry_required: true`, without a download link.
+
+Creating a link requires the normal authenticated MCP connection.
+Anyone with the resulting link can download the snapshot until it expires or the service stops.
+Treat the URL as a temporary access credential. Do not export secrets without a deliberate request.
+The new profile does not restore the legacy change-card UI.
 
 ## Commands and output
 
@@ -157,5 +182,5 @@ references, polling, and reconnects. See [the validation report](strict-codex-va
 The HTTP test does not validate ChatGPT rendering or a public tunnel.
 A live profile switch still requires a client tool refresh and a new chat.
 
-The strict profile does not expose `export_file` or the legacy change-card UI.
+The strict profile includes `export_file`. It does not expose the legacy change-card UI.
 Use a retained profile when those extensions are required.

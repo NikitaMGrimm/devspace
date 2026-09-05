@@ -146,6 +146,11 @@ function fixtures(root: string) {
       if (!statSync(cwd).isDirectory()) throw new Error("Not a directory.");
       return cwd;
     },
+    resolvePath(workspace: Workspace, path: string) {
+      const absolutePath = resolve(workspace.root, path);
+      if (relative(workspace.root, absolutePath).startsWith("..")) throw new Error("Outside workspace.");
+      return absolutePath;
+    },
     resolveReadPath(workspace: Workspace, path: string) {
       const absolutePath = resolve(workspace.root, path);
       if (relative(workspace.root, absolutePath).startsWith("..")) throw new Error("Outside workspace.");
@@ -166,7 +171,7 @@ test("catalog is available before open_workspace and never changes after opening
   const root = await temporary(t), other = await temporary(t);
   const f = fixtures(root), api = createCodexToolset(f.registry, f.processes);
   const original = JSON.stringify(api.tools);
-  assert.deepEqual(api.tools.map((tool) => tool.name), ["open_workspace", "exec_command", "write_stdin", "apply_patch", "view_image", "read"]);
+  assert.deepEqual(api.tools.map((tool) => tool.name), ["open_workspace", "exec_command", "write_stdin", "apply_patch", "view_image", "read", "export_file"]);
   assert.equal(CODEX_COMPAT_COMMIT.length, 40);
   await api.call("open_workspace", {path:root}); await api.call("open_workspace", {path:other});
   assert.equal(JSON.stringify(api.tools), original);
@@ -257,4 +262,78 @@ test("signal exit codes support pipe names and native PTY numbers", () => {
   assert.equal(codexProcessResult({ ...snapshot, signal: "15", exitCode: 0 }).structuredContent?.exit_code, 143);
   assert.equal(codexProcessResult({ ...snapshot, signal: "0", exitCode: 7 }).structuredContent?.exit_code, 7);
   assert.equal(codexProcessResult({ ...snapshot, exitCode: 0 }).structuredContent?.exit_code, 0);
+});
+
+
+test("export_file is a separate extension with a workspace-relative path", () => {
+  const tool = codexToolDefinitions().find(({ name }) => name === "export_file")!;
+  assert.deepEqual(Object.keys(tool.inputSchema.properties!).sort(), ["environment_id", "path"]);
+  assert.deepEqual(tool.inputSchema.required, ["path"]);
+  assert.equal(tool.inputSchema.additionalProperties, false);
+  assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+  assert.ok(tool.outputSchema);
+});
+
+test("export_file uses the shared exporter and returns a resource link plus metadata", async (t) => {
+  const root = await temporary(t), f = fixtures(root);
+  const calls: Array<{ workspaceRoot: string; path: string }> = [];
+  const exported = { url: "https://devspace.example.com/devspace-files/d/" + "a".repeat(43),
+    name: "artifact.zip", mimeType: "application/zip", size: 42,
+    sha256: "b".repeat(64), expiresAt: "2026-09-05T18:00:00.000Z" };
+  const api = createCodexToolset(f.registry, f.processes, undefined, {
+    async exportFile(input) { calls.push(input); return exported; },
+  });
+  assert.equal((await api.call("export_file", { path: "artifact.zip" })).isError, true);
+  await api.call("open_workspace", { path: root });
+  const result = await api.call("export_file", { path: "artifact.zip" });
+  assert.deepEqual(calls, [{ workspaceRoot: root, path: "artifact.zip" }]);
+  assert.deepEqual(result.structuredContent, { url: exported.url, filename: exported.name,
+    mime_type: exported.mimeType, size: exported.size, sha256: exported.sha256, expires_at: exported.expiresAt });
+  assert.deepEqual(result.content[0], { type: "resource_link", uri: exported.url,
+    name: exported.name, mimeType: exported.mimeType, size: exported.size });
+  const text = result.content[1]!;
+  assert.ok(text.type === "text");
+  assert.deepEqual(JSON.parse(text.text), result.structuredContent);
+  assert.equal((await api.call("export_file", { path: "artifact.zip", workspace_id: "legacy" })).isError, true);
+  assert.equal((await api.call("export_file", { path: "artifact.zip", download_name: "renamed.zip" })).isError, true);
+  assert.equal(calls.length, 1);
+});
+
+test("export_file preflight is connection-local and ambiguous environments never export", async (t) => {
+  const root = await temporary(t), other = await temporary(t), f = fixtures(root);
+  const nested = join(root, "exports"); await mkdir(nested); f.instructions.set(nested, "Export instructions.");
+  const calls: string[] = [];
+  const exporter = { async exportFile(input: { workspaceRoot: string; path: string }) {
+    calls.push(input.workspaceRoot);
+    return { url: "https://devspace.example.com/download", name: "artifact.txt", mimeType: "text/plain",
+      size: 1, sha256: "a".repeat(64), expiresAt: new Date().toISOString() };
+  } };
+  const first = createCodexToolset(f.registry, f.processes, undefined, exporter);
+  const second = createCodexToolset(f.registry, f.processes, undefined, exporter);
+  for (const api of [first, second]) {
+    await api.call("open_workspace", { path: root });
+    const blocked = await api.call("export_file", { path: "exports/artifact.txt" });
+    assert.equal(blocked.structuredContent?.status, "instructions_required");
+    assert.equal(blocked.structuredContent?.retry_required, true);
+    assert.equal(blocked.content.some(({ type }) => type === "resource_link"), false);
+  }
+  assert.equal(calls.length, 0);
+  await first.call("export_file", { path: "exports/artifact.txt" });
+  assert.deepEqual(calls, [root]);
+  await first.call("open_workspace", { path: other });
+  assert.equal((await first.call("export_file", { path: "artifact.txt" })).isError, true);
+  assert.equal(calls.length, 1);
+  await first.call("export_file", { environment_id: "ws_two", path: "artifact.txt" });
+  assert.deepEqual(calls, [root, other]);
+});
+
+test("export_file does not disclose unexpected internal errors", async (t) => {
+  const root = await temporary(t), f = fixtures(root);
+  const api = createCodexToolset(f.registry, f.processes, undefined, {
+    async exportFile() { throw new Error("private filesystem path or download token"); },
+  });
+  await api.call("open_workspace", { path: root });
+  const result = await api.call("export_file", { path: "artifact.zip" });
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.content, [{ type: "text", text: "Unable to export file." }]);
 });

@@ -57,3 +57,29 @@ the server account's permissions. The profile does not add an operating-system s
 
 Before activation, keep a working rollback path outside the MCP service.
 After activation, refresh the client tool definitions and start a new chat.
+
+
+## Export extension follow-up — 2026-09-05
+
+The `export_file` extension uses the shared export manager in `strict-codex`.
+It adds one tool without changing the six existing tool schemas or descriptions.
+A comparison against commit `d423bec18c0ba4e8cb8024438d1bae67f800cf35` verified this at the JSON level.
+The process manager, patch engine, original export manager, and legacy tool handlers are unchanged.
+
+Follow-up checks ran in an isolated Linux VPS worktree with Node 26.5.1 and npm 11.17.0.
+They used Bash through `SHELL=/bin/bash`, consistent with the prior WSL validation.
+The compatibility tests now include 27 component tests, 10 process tests, and 13 HTTP scenarios.
+Four new component tests and four new HTTP scenarios cover the export extension.
+
+Export checks cover actual GET and HEAD downloads, complete metadata, hashes, and immutable bytes.
+They also cover traversal, symlink escapes, directories, missing files, size limits, and client-local instruction checks.
+Tests reject ambiguous environment selection and legacy arguments. Unexpected exporter errors do not expose internal details.
+The original export-manager suite continues to cover expiry, capacity, and log redaction.
+
+The VPS default shell was `/bin/sh` with no `SHELL` setting.
+The existing PTY interruption scenario did not complete under that shell.
+The unchanged scenario passed with Bash. This change does not alter shell or signal handling.
+
+This follow-up does not certify the update through the WSL public endpoint or ChatGPT rendering.
+The WSL server had already switched profiles, while the current chat retained legacy tool schemas.
+No WSL or VPS production service was restarted during this work.

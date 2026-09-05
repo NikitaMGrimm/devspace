@@ -930,7 +930,7 @@ function createMcpServer(
   );
 
   if (config.toolMode === "strict-codex") {
-    const tools = createCodexToolset(workspaces, processSessions, (entry) => logToolCall(config, entry));
+    const tools = createCodexToolset(workspaces, processSessions, (entry) => logToolCall(config, entry), exportManager);
     server.server.registerCapabilities({ tools: {} });
     server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools.tools }));
     server.server.setRequestHandler(CallToolRequestSchema, async (request) =>

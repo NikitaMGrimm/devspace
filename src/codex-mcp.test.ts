@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +50,7 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
       DEVSPACE_STATE_DIR: join(temporary, "state"), DEVSPACE_WORKTREE_ROOT: join(temporary, "worktrees"),
       DEVSPACE_OAUTH_OWNER_TOKEN: ownerToken, DEVSPACE_TOOL_MODE: "strict-codex",
       DEVSPACE_WIDGETS: "off", DEVSPACE_LOG_LEVEL: "silent", DEVSPACE_SUBAGENTS: "0",
+      DEVSPACE_EXPORT_MAX_BYTES: "4096",
     }));
     const postForm = (path: string, fields: Record<string, string>) => fetch(`${baseUrl}${path}`, {
       method: "POST", redirect: "manual", body: new URLSearchParams(fields),
@@ -110,7 +111,7 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
     const catalog = await first.listTools();
     await t.test("fixed catalog before workspace opening and schema rejection", async () => {
       assert.deepEqual(catalog.tools.map(({ name }) => name).sort(),
-        ["apply_patch", "exec_command", "open_workspace", "read", "view_image", "write_stdin"]);
+        ["apply_patch", "exec_command", "export_file", "open_workspace", "read", "view_image", "write_stdin"]);
       assert.equal((await call(first, "exec_command", { cmd: "echo bad", workspace_id: "legacy" })).isError, true);
       assert.equal((await call(first, "exec_command", { cmd: "echo no-workspace" })).isError, true);
     });
@@ -148,6 +149,62 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
       assert.match(String((await ok(first, "read", { path: reference })).structuredContent!.content), /Skill reference/);
       assert.equal((await call(second, "read", { path: reference })).isError, true);
     });
+    await t.test("export_file returns downloadable immutable bytes and complete metadata", async () => {
+      const result = await ok(first, "export_file", { path: "pixel.png" });
+      const metadata = result.structuredContent!;
+      const link = result.content.find((block) => block.type === "resource_link");
+      assert.ok(link?.type === "resource_link");
+      assert.equal(link.uri, metadata.url);
+      assert.equal(link.name, "pixel.png");
+      assert.equal(link.mimeType, "image/png");
+      assert.equal(link.size, png.length);
+      assert.deepEqual(Object.keys(metadata).sort(), ["expires_at", "filename", "mime_type", "sha256", "size", "url"]);
+      assert.equal(metadata.sha256, createHash("sha256").update(png).digest("hex"));
+      assert.ok(Date.parse(String(metadata.expires_at)) > Date.now());
+      assert.equal(String(metadata.url).startsWith(baseUrl + "/devspace-files/d/"), true);
+      const text = result.content.find((block) => block.type === "text");
+      assert.ok(text?.type === "text");
+      assert.deepEqual(JSON.parse(text.text), metadata);
+      await writeFile(join(project, "pixel.png"), "changed after export");
+      const head = await fetch(String(metadata.url), { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get("content-type"), "image/png");
+      assert.equal(head.headers.get("content-length"), String(png.length));
+      assert.match(head.headers.get("content-disposition")!, /attachment.*pixel\.png/);
+      assert.equal(head.headers.get("x-content-type-options"), "nosniff");
+      const downloaded = await fetch(String(metadata.url));
+      assert.equal(downloaded.status, 200);
+      assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), png);
+      await writeFile(join(project, "pixel.png"), png);
+    });
+    await t.test("export_file rejects traversal, symlink escapes, directories and oversized files", async () => {
+      await writeFile(join(temporary, "outside.txt"), "outside the workspace");
+      await writeFile(join(project, "too-large.bin"), Buffer.alloc(4097));
+      for (const path of ["../outside.txt", join(project, "pixel.png"), "nested", "missing.txt", "too-large.bin"]) {
+        const denied = await call(first, "export_file", { path });
+        assert.equal(denied.isError, true, path);
+        assert.equal(denied.content.some((block) => block.type === "resource_link"), false);
+      }
+      if (process.platform !== "win32") {
+        await symlink(join(temporary, "outside.txt"), join(project, "outside-link.txt"));
+        assert.equal((await call(first, "export_file", { path: "outside-link.txt" })).isError, true);
+      }
+      assert.equal((await call(first, "export_file", { path: "pixel.png", workspace_id: environment_id })).isError, true);
+    });
+    await t.test("export_file waits for each client's project instructions before publishing a link", async () => {
+      await mkdir(join(project, "exports"));
+      await writeFile(join(project, "exports", "AGENTS.md"), "Review these export instructions.\n");
+      await writeFile(join(project, "exports", "report.txt"), "downloadable report\n");
+      for (const client of [first, second]) {
+        const blocked = await ok(client, "export_file", { path: "exports/report.txt" });
+        assert.equal(blocked.structuredContent?.status, "instructions_required");
+        assert.equal(blocked.structuredContent?.retry_required, true);
+        assert.match(String(blocked.structuredContent?.instructions), /Review these export instructions/);
+        assert.equal(blocked.content.some((block) => block.type === "resource_link"), false);
+        const result = await ok(client, "export_file", { path: "exports/report.txt" });
+        assert.equal(await (await fetch(String(result.structuredContent!.url))).text(), "downloadable report\n");
+      }
+    });
     const worktree = (await ok(first, "open_workspace", { path: project, mode: "worktree" })).structuredContent!;
     const worktreeId = worktree.environment_id as string;
     await t.test("explicit environment selection and isolated worktrees", async () => {
@@ -158,6 +215,14 @@ test("strict-codex over authenticated HTTP with independent clients", { timeout:
       assert.equal(await readFile(join(String(worktree.cwd), "sample.txt"), "utf8"), "worktree-only\n");
       assert.equal(await readFile(join(project, "moved.txt"), "utf8"), "changed\n");
       assert.match(String((await ok(second, "exec_command", { cmd: "echo peer-project" })).structuredContent!.output), /peer-project/);
+    });
+    await t.test("export_file selects the explicit environment and retains existing links", async () => {
+      assert.equal((await call(first, "export_file", { path: "sample.txt" })).isError, true);
+      const worktreeExport = await ok(first, "export_file", { environment_id: worktreeId, path: "sample.txt" });
+      assert.equal(await (await fetch(String(worktreeExport.structuredContent!.url))).text(), "worktree-only\n");
+      const checkoutExport = await ok(first, "export_file", { environment_id, path: "moved.txt" });
+      assert.equal(await (await fetch(String(checkoutExport.structuredContent!.url))).text(), "changed\n");
+      assert.deepEqual((await first.listTools()).tools, catalog.tools);
     });
     await t.test("stdin EOF and persistent process polling", async () => {
       const eof = await ok(first, "exec_command", { environment_id,

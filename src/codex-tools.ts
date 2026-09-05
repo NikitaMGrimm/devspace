@@ -4,13 +4,14 @@ import { dirname, resolve } from "node:path";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Workspace, WorkspaceRegistry } from "./workspaces.js";
 import type { ProcessSessionManager, ProcessSnapshot } from "./process-sessions.js";
+import { ExportFileError, type DevSpaceExportManager } from "./export-manager.js";
 import { applyCodexPatch, containedPatchPath, parseCodexPatch } from "./codex-patch.js";
 
 // Tool descriptions/schema descriptions adapted from OpenAI Codex (Apache-2.0).
 // See docs/licenses/openai-codex-Apache-2.0.txt.
 // Pinned, not downloaded at startup. See docs/codex-compatibility.md for deliberate deviations.
 export const CODEX_COMPAT_COMMIT = "c126b0d8ef87fbcde2df7b9c40f24aa91b855758";
-export const CODEX_SERVER_INSTRUCTIONS = "Use these tools directly; do not delegate to Codex. Call open_workspace once for a project or worktree. It returns environment_id, cwd and project instructions. Omit environment_id only when one environment is open; otherwise supply it explicitly. Use exec_command for file inspection, searches and commands, apply_patch for edits, and write_stdin to poll or interact with a running process. Use view_image for local images. The read extension resolves advertised skill:// resources; read a matching skill before using it. If a tool reports that project instructions changed, read them and retry: that operation was not executed. MCP carries apply_patch in the JSON string field patch, not as a freeform transport. File tools are workspace-scoped; shell commands are not an OS sandbox. Tool definitions are fixed for the lifetime of this profile.";
+export const CODEX_SERVER_INSTRUCTIONS = "Use these tools directly; do not delegate to Codex. Call open_workspace once for a project or worktree. It returns environment_id, cwd and project instructions. Omit environment_id only when one environment is open; otherwise supply it explicitly. Use exec_command for file inspection, searches and commands, apply_patch for edits, and write_stdin to poll or interact with a running process. Use view_image for local images. The read extension resolves advertised skill:// resources; read a matching skill before using it. Use the export_file extension for downloadable artifacts instead of printing file bytes or base64. Export links expire and grant access to anyone who has the link. If a tool reports that project instructions changed, read them and retry: that operation was not executed. MCP carries apply_patch in the JSON string field patch, not as a freeform transport. File tools are workspace-scoped; shell commands are not an OS sandbox. Tool definitions are fixed for the lifetime of this profile.";
 
 const string = (description: string) => ({ type: "string", description });
 const number = (description: string) => ({ type: "number", description });
@@ -73,6 +74,26 @@ export function codexToolDefinitions(): Tool[] {
       limit: number("Maximum lines to return. Defaults to 2000; capped at 2000."),
       environment_id: environment,
     }, ["path"], true),
+    {
+      ...definition("export_file", "DevSpace extension: export a regular workspace file as a downloadable resource. Use this for downloadable artifacts instead of printing binary or base64 data. The link expires and grants access to anyone who has it.", {
+        path: string("Workspace-relative path to a regular file."),
+        environment_id: environment,
+      }, ["path"], true),
+      outputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          url: { type: "string", format: "uri" },
+          filename: { type: "string" },
+          mime_type: { type: "string" },
+          size: { type: "integer", minimum: 0 },
+          sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          expires_at: { type: "string" },
+          status: { type: "string", enum: ["instructions_required"] },
+          instructions: { type: "string" },
+          retry_required: { type: "boolean" },
+        },
+      },
+    },
   ];
 }
 
@@ -148,6 +169,7 @@ export function createCodexToolset(
   workspaces: WorkspaceRegistry,
   processes: ProcessSessionManager,
   log?: (entry: CodexCallLog) => void,
+  exportManager?: Pick<DevSpaceExportManager, "exportFile">,
 ): { tools: Tool[]; call(name: string, args?: Arguments): Promise<CallToolResult> } {
   const tools = codexToolDefinitions();
   const environments = new Map<string, Environment>();
@@ -257,6 +279,34 @@ export function createCodexToolset(
       if (control) return control;
       const data = await readSmallFile(path, 8 * 1024 * 1024);
       return { content: [{ type: "image", data: data.toString("base64"), mimeType: imageMime(data) }] };
+    }
+    if (name === "export_file") {
+      if (!exportManager) throw new Error("File export is not configured for this server.");
+      try {
+        const path = args.path as string;
+        const target = workspaces.resolvePath(entry.workspace, path);
+        const control = await preflight(entry, [dirname(target)]);
+        if (control) {
+          return objectResult({
+            status: "instructions_required",
+            instructions: control.content.map((block) => block.type === "text" ? block.text : "").join("\n"),
+            retry_required: true,
+          });
+        }
+        const exported = await exportManager.exportFile({ workspaceRoot: entry.workspace.root, path });
+        const result = objectResult({
+          url: exported.url, filename: exported.name, mime_type: exported.mimeType,
+          size: exported.size, sha256: exported.sha256, expires_at: exported.expiresAt,
+        });
+        result.content.unshift({
+          type: "resource_link", uri: exported.url, name: exported.name,
+          mimeType: exported.mimeType, size: exported.size,
+        });
+        return result;
+      } catch (error) {
+        if (error instanceof ExportFileError) throw error;
+        throw new Error("Unable to export file.");
+      }
     }
     const readPath = workspaces.resolveReadPath(entry.workspace, args.path as string);
     const directInstructions = !readPath.skillRead && await workspaces.isDirectInstructionRead(entry.workspace, args.path as string);

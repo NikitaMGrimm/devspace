@@ -168,7 +168,8 @@ DEVSPACE_TOOL_MODE=strict-codex node dist/cli.js serve
 ```
 
 The profile adds Codex-style command results, complete patch documents, and
-local image responses. It does not start another coding agent. The existing
+local image responses. The `export_file` extension provides downloadable files
+without changing the other tool interfaces. It does not start another coding agent. The existing
 `minimal`, `full`, and `codex` profiles remain available.
 
 Read [Codex compatibility](docs/codex-compatibility.md) for the tool contract and
