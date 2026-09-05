@@ -80,6 +80,7 @@ try {
 
   const config = loadConfig({
     DEVSPACE_CONFIG_DIR: join(root, ".config"),
+    DEVSPACE_AGENT_DIR: join(root, ".test-agent-home"),
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     PORT: "1",

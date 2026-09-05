@@ -50,6 +50,7 @@ await git(root, ["push", "--set-upstream", "origin", "HEAD"]);
 
 const running = createMcpServerForTesting(loadConfig({
   DEVSPACE_CONFIG_DIR: configDir,
+  DEVSPACE_AGENT_DIR: join(configDir, "codex-home"),
   DEVSPACE_ALLOWED_ROOTS: root,
   DEVSPACE_ALLOWED_HOSTS: "*",
   DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
@@ -308,6 +309,7 @@ for (const [widgetMode, expectedUiTools] of [
 ] as const) {
   const widgetServer = createMcpServerForTesting(loadConfig({
     DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_AGENT_DIR: join(configDir, "codex-home"),
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_ALLOWED_HOSTS: "*",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
@@ -343,6 +345,7 @@ for (const [widgetMode, expectedUiTools] of [
 for (const mode of ["minimal", "full"] as const) {
   const compatibilityServer = createMcpServerForTesting(loadConfig({
     DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_AGENT_DIR: join(configDir, "codex-home"),
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_ALLOWED_HOSTS: "*",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
